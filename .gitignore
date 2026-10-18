@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# test run logs
+p*-before.xml
+p*-after.xml
+# secrets live in ~/.config/tracforce-crawler/, never here
+.env
+*.env

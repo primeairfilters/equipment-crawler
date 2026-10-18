@@ -1,0 +1,23 @@
+services:
+  crawler:
+    build: .
+    env_file:
+      - ${HOME}/.config/tracforce-crawler/db.env
+      - path: ${HOME}/.config/tracforce-crawler/anthropic.env
+        required: false
+    volumes:
+      - .:/work:ro
+    working_dir: /work
+    mem_limit: 2g
+    pids_limit: 256
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - hvac-network
+
+networks:
+  hvac-network:
+    name: hvacapp_hvac-network
+    external: true
