@@ -1,4 +1,5 @@
 #!/bin/sh
 # Runs the crawler inside its container: ./crawl migrate
 cd "$(dirname "$0")" || exit 1
+mkdir -p "$HOME/Documents/equipment-crawler-docs"
 exec docker compose run --rm crawler python -m crawler "$@"

@@ -37,7 +37,10 @@ def start(world, path="/start", brand=None):
 
 
 def crawl(world, **kwargs):
+    """A crawl with a stand-in AI link check that says yes to every link the rules are unsure about (P11)."""
     from crawler.crawl import run
+    from p11support import Checker
+    kwargs.setdefault("link_checker", Checker())
     return run(world.conn, world.fetcher(), brand=kwargs.pop("brand", world.brand), **kwargs)
 
 
@@ -60,25 +63,27 @@ def test_run_fetches_the_start_url_and_follows_relative_and_absolute_links(world
                (world.brand_id,))[0][0] == 4
 
 
-def test_links_are_followed_at_most_two_deep(world):
+def test_links_are_followed_at_most_three_deep_by_default(world):
     start(world)
     serve(world, "/start", "/a")
     serve(world, "/a", "/b")
     serve(world, "/b", "/c")
     serve(world, "/c", "/d")
+    serve(world, "/d", "/e")
     crawl(world)
-    assert sorted(paths(world)) == ["/a", "/b", "/start"]  # /c would be depth 3
-    depths = dict(one(world, "SELECT SUBSTRING_INDEX(url, '/', -1), depth FROM pages WHERE brand_id = %s",
+    assert sorted(paths(world)) == ["/a", "/b", "/c", "/start"]  # /d is depth 4 (D60: the default is 3)
+    depths = dict(one(world, "SELECT split_part(url, '/', -1), depth FROM pages WHERE brand_id = %s",
                       (world.brand_id,)))
-    assert depths == {"start": 0, "a": 1, "b": 2}
+    assert depths == {"start": 0, "a": 1, "b": 2, "c": 3, "d": 4}  # /d is recorded beyond depth, never fetched
 
 
-def test_max_depth_is_a_setting(world):
-    start(world)
+def test_max_depth_is_a_setting_of_the_start_address(world):
+    from crawler.brands import add_start_url
+    add_start_url(world.conn, world.brand, world.url("ruud.test", "/start"), depth=1)
     serve(world, "/start", "/a")
     serve(world, "/a", "/b")
     serve(world, "/b")
-    crawl(world, max_depth=1)
+    crawl(world)
     assert sorted(paths(world)) == ["/a", "/start"]
 
 
@@ -154,7 +159,10 @@ def test_the_page_cap_per_start_url_is_exact(world):
     crawl(world, max_pages=5)
     assert len(paths(world)) == 5            # the start URL and four links, no more
     assert paths(world)[0] == "/start"
-    assert one(world, "SELECT COUNT(*) FROM pages WHERE brand_id = %s", (world.brand_id,))[0][0] == 5
+    assert one(world, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND fetched_at IS NOT NULL",
+               (world.brand_id,))[0][0] == 5
+    assert one(world, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND fetch_state = 'over_limit'",
+               (world.brand_id,))[0][0] == 8  # the rest are recorded, not fetched (P11)
 
 
 def test_the_cap_is_counted_per_start_url_not_per_brand(world):
@@ -183,7 +191,7 @@ def test_a_pdf_is_fetched_but_not_searched_for_links(world):
     assert sorted(paths(world)) == ["/a", "/doc.pdf", "/start"]
     assert "/trap" not in paths(world)
     assert one(world, "SELECT is_pdf FROM pages WHERE brand_id = %s AND url LIKE '%%doc.pdf'",
-               (world.brand_id,)) == ((1,),)
+               (world.brand_id,)) == ((True,),)
 
 
 def test_a_failing_link_does_not_stop_the_rest_of_the_crawl(world):
@@ -210,11 +218,10 @@ def test_a_stopped_brand_is_skipped_and_an_active_one_still_runs(world):
     serve(world, "/live-start")
     stop(world.conn, world.brand)
 
-    from crawler.crawl import run
-    run(world.conn, world.fetcher(), brand=world.brand)
+    crawl(world, brand=world.brand)
     assert world.site.requests == []  # the stopped brand: nothing at all, not even robots.txt
 
-    run(world.conn, world.fetcher(), brand=other)  # control: the path runs for an active brand
+    crawl(world, brand=other)  # control: the path runs for an active brand
     assert paths(world) == ["/live-start"]
 
 

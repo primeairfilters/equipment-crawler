@@ -1,0 +1,1 @@
+ALTER TABLE equipment_sources ADD COLUMN IF NOT EXISTS doc_type VARCHAR(30) NULL;

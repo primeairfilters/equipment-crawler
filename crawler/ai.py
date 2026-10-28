@@ -10,11 +10,13 @@ from decimal import Decimal
 
 HAIKU = "claude-haiku-5-5"
 SONNET = "claude-sonnet-5-5"
+EMBED_SMALL = "text-embedding-3-small"  # OpenAI, for section vectors (D42); no output tokens
 
 # dollars per million tokens: (input, output). Batch calls cost half.
 PRICES = {
     HAIKU: (Decimal("0.10"), Decimal("0.50")),
     SONNET: (Decimal("2"), Decimal("10")),
+    EMBED_SMALL: (Decimal("0.02"), Decimal("0")),  # OpenAI pricing page, checked 2026-10-27
 }
 SEARCH_PRICE = Decimal("0.01")
 MILLION = Decimal(1_000_000)
@@ -128,6 +130,16 @@ class AnthropicClient:
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses,
                     "allowed_domains": list(hosts), "allowed_callers": ["direct"]}],
             output_config={"format": {"type": "json_schema", "schema": GAP_SCHEMA}})
+        return self._search_reply(reply)
+
+    def ask_links(self, model, context, links, max_tokens):
+        """One live call: should the crawler open each of these links? The answer is a JSON object (LINK_SCHEMA)."""
+        from crawler.linkcheck import LINK_SCHEMA, LINK_SYSTEM, request_text
+        reply = self._sdk.messages.create(
+            model=model, max_tokens=max_tokens, system=self._system(LINK_SYSTEM),
+            messages=[{"role": "user", "content": request_text(context, links)}],
+            thinking={"type": "disabled"},
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": LINK_SCHEMA}})
         return self._search_reply(reply)
 
     @staticmethod

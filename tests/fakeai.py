@@ -146,3 +146,33 @@ class FakeGapAI:
 
     def searches(self):
         return [c for c in self.calls if c[0] == "find_documents"]
+
+
+class FakeLinkAI:
+    """Fake for the "Should I crawl this page?" check: one live call per page carrying all its unsure links.
+
+    The real client method is
+      ask_links(model, context, links, max_tokens) -> crawler.ai.DiscoverReply (searches = 0)
+    context is {"url", "title", "heading"}; links is [(url, link_text), ...], numbered from 1 in the request.
+    The output is {"answers": [{"n": 1, "crawl": true, "reason": "..."}], "suggest_skip": ["news", ...]}.
+    `answer` is callable(url, text) -> bool, or a ready output dict / unusable string returned as is.
+    """
+
+    def __init__(self, answer=lambda url, text: True, *, suggest=(), input_tokens=400, output_tokens=60):
+        self.answer = answer
+        self.suggest = list(suggest)
+        self.usage = (input_tokens, output_tokens)
+        self.calls = []
+
+    def ask_links(self, model, context, links, max_tokens):
+        from crawler.ai import DiscoverReply
+        self.calls.append(("ask_links", model, dict(context), list(links), max_tokens))
+        in_tok, out_tok = self.usage
+        if callable(self.answer):
+            out = {"answers": [{"n": n, "crawl": bool(self.answer(u, t)), "reason": "fake reason"}
+                               for n, (u, t) in enumerate(links, start=1)], "suggest_skip": self.suggest}
+        else:
+            out = self.answer
+        if isinstance(out, dict):
+            return DiscoverReply(output=out, raw_text=json.dumps(out), input_tokens=in_tok, output_tokens=out_tok, searches=0)
+        return DiscoverReply(output=None, raw_text=str(out), input_tokens=in_tok, output_tokens=out_tok, searches=0)

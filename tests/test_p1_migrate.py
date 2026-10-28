@@ -1,9 +1,8 @@
-"""P1: `migrate` builds every table, records itself, and a re-run changes nothing.
+"""P1 (P10 on PostgreSQL): `migrate` builds every table in crawl and kb, records itself, and a re-run changes nothing.
 
-Migrate only adds. The re-run check is a read-only before/after comparison of
-information_schema plus the schema_migrations rows.
+Migrate only adds. The re-run check is a read-only before/after comparison of the catalog
+plus the schema_migrations rows.
 """
-import os
 import re
 import subprocess
 import sys
@@ -15,16 +14,20 @@ ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = ROOT / "migrations"
 
 EXPECTED_TABLES = {
-    "schema_migrations",
-    "brands", "brand_domains", "start_urls", "hosts", "pages", "page_text",
-    "found_models", "found_specs", "energy_star_rows", "ai_calls",
-    "manufacturers", "manufacturer_aliases", "equipment_models", "equipment_sources",
-    "equipment_model_sources", "equipment_systems", "equipment_system_members",
-    "equipment_specs",
+    ("crawl", "schema_migrations"),
+    ("crawl", "brands"), ("crawl", "brand_domains"), ("crawl", "start_urls"), ("crawl", "hosts"),
+    ("crawl", "pages"), ("crawl", "page_text"), ("crawl", "page_links"), ("crawl", "crawl_runs"),
+    ("crawl", "crawl_keywords"), ("crawl", "ai_calls"), ("crawl", "gapfill_searches"), ("crawl", "es_rows"),
+    ("crawl", "es_state"), ("crawl", "files"), ("crawl", "document_urls"), ("crawl", "keyword_suggestions"),
+    ("kb", "manufacturers"), ("kb", "manufacturer_aliases"), ("kb", "models"), ("kb", "documents"),
+    ("kb", "document_models"), ("kb", "sections"), ("kb", "section_terms"), ("kb", "visibility_log"),
+    ("kb", "es_systems"), ("kb", "es_system_members"),
 }
 
+# DROP is forbidden except `DROP CONSTRAINT IF EXISTS`, which removes no data: the user approved it on 2026-10-27
+# for swapping a CHECK constraint (0002). DROP TABLE / COLUMN / INDEX / SCHEMA stay forbidden.
 FORBIDDEN_SQL = [
-    r"\bDROP\b", r"\bDELETE\b", r"\bTRUNCATE\b", r"\bREPLACE\b", r"\bCASCADE\b",
+    r"\bDROP\b(?!\s+CONSTRAINT\s+IF\s+EXISTS\b)", r"\bDELETE\b", r"\bTRUNCATE\b", r"\bREPLACE\b", r"\bCASCADE\b",
     r"\bSET\s+NULL\b", r"\bSET\s+DEFAULT\b",
 ]
 
@@ -54,23 +57,26 @@ def rows(sql):
 
 
 def table_names():
-    return {r[0] for r in rows(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'")}
+    """Ordinary and partitioned tables in crawl and kb; partitions themselves are left out."""
+    return {(s, t) for s, t in rows(
+        "SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname IN ('crawl', 'kb') AND c.relkind IN ('r', 'p') AND NOT c.relispartition")}
 
 
 def snapshot():
     return {
-        "tables": rows("SELECT table_name, engine, table_collation, create_time FROM information_schema.tables "
-                       "WHERE table_schema = DATABASE() ORDER BY 1"),
-        "columns": rows("SELECT table_name, column_name, ordinal_position, column_type, is_nullable, "
-                        "column_key, column_default, extra FROM information_schema.columns "
-                        "WHERE table_schema = DATABASE() ORDER BY 1, 3"),
-        "indexes": rows("SELECT table_name, index_name, seq_in_index, column_name, non_unique "
-                        "FROM information_schema.statistics WHERE table_schema = DATABASE() ORDER BY 1, 2, 3"),
-        "constraints": rows("SELECT table_name, constraint_name, constraint_type FROM "
-                            "information_schema.table_constraints WHERE table_schema = DATABASE() ORDER BY 1, 2"),
-        "schema_migrations": rows("SELECT * FROM schema_migrations ORDER BY 1"),
+        "tables": rows("SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                       "WHERE n.nspname IN ('crawl', 'kb') ORDER BY 1, 2"),
+        "columns": rows("SELECT table_schema, table_name, column_name, ordinal_position, data_type, is_nullable, "
+                        "column_default, collation_name FROM information_schema.columns "
+                        "WHERE table_schema IN ('crawl', 'kb') ORDER BY 1, 2, 4"),
+        "indexes": rows("SELECT schemaname, tablename, indexname, indexdef FROM pg_indexes "
+                        "WHERE schemaname IN ('crawl', 'kb') ORDER BY 1, 2, 3"),
+        "constraints": rows("SELECT conrelid::regclass::text, conname, contype, pg_get_constraintdef(oid) FROM pg_constraint "
+                            "WHERE connamespace IN ('crawl'::regnamespace, 'kb'::regnamespace) ORDER BY 1, 2"),
+        "grants": rows("SELECT table_schema, table_name, grantee, privilege_type FROM information_schema.role_table_grants "
+                       "WHERE table_schema IN ('crawl', 'kb') ORDER BY 1, 2, 3, 4"),
+        "schema_migrations": rows("SELECT * FROM crawl.schema_migrations ORDER BY 1"),
     }
 
 
@@ -88,43 +94,56 @@ def test_migration_files_are_numbered_and_additive_only():
     for f in files:
         assert re.match(r"^\d{4}_.+\.sql$", f.name), f.name
         sql = re.sub(r"/\*.*?\*/", "", f.read_text(), flags=re.S)
-        sql = re.sub(r"(--|#)[^\n]*", "", sql)
+        sql = re.sub(r"--[^\n]*", "", sql)
         for pattern in FORBIDDEN_SQL:
             assert not re.search(pattern, sql, flags=re.I), f"{f.name} contains {pattern}"
+
+
+def test_drop_is_only_allowed_for_a_constraint():
+    allowed = "ALTER TABLE crawl.pages DROP CONSTRAINT IF EXISTS pages_fetch_state_check"
+    assert not any(re.search(p, allowed, flags=re.I) for p in FORBIDDEN_SQL)
+    for bad in ("DROP TABLE crawl.pages", "ALTER TABLE crawl.pages DROP COLUMN url", "DROP INDEX pages_host",
+                "ALTER TABLE crawl.pages DROP CONSTRAINT pages_fetch_state_check", "DROP SCHEMA kb"):
+        assert any(re.search(p, bad, flags=re.I) for p in FORBIDDEN_SQL), bad
 
 
 def test_migrate_creates_every_table_and_records_each_migration():
     migrate_ok()
     tables = table_names()
     assert EXPECTED_TABLES <= tables, f"missing: {sorted(EXPECTED_TABLES - tables)}"
-    assert int(rows("SELECT COUNT(*) FROM schema_migrations")[0][0]) == len(migration_files())
+    assert int(rows("SELECT COUNT(*) FROM crawl.schema_migrations")[0][0]) == len(migration_files())
 
 
 def test_key_columns_and_indexes_exist():
     migrate_ok()
     cols = {(t, c) for t, c in rows(
-        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = DATABASE()")}
-    assert ("equipment_specs", "extracted_by") in cols
-    assert ("equipment_models", "model_key") in cols
-    assert ("equipment_models", "is_base_model") in cols
-
-    idx = {}
-    for name, non_unique, seq, col in rows(
-        "SELECT index_name, non_unique, seq_in_index, column_name FROM information_schema.statistics "
-        "WHERE table_schema = DATABASE() AND table_name = 'equipment_models' ORDER BY 1, 3"):
-        idx.setdefault(name, {"unique": non_unique == "0", "cols": []})["cols"].append(col)
-    assert any(i["unique"] and "model_key" in i["cols"] and len(i["cols"]) >= 2 for i in idx.values()), idx
-    assert any(i["cols"][0] == "model_key" for i in idx.values()), idx
+        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema IN ('crawl', 'kb')")}
+    for needed in [("models", "model_key"), ("models", "is_base_model"), ("document_models", "model_key"),
+                   ("sections", "is_live"), ("documents", "content_sha"), ("pages", "fetch_state"),
+                   ("hosts", "ignore_robots"), ("start_urls", "depth")]:
+        assert needed in cols, needed
+    defs = [r[0] for r in rows("SELECT indexdef FROM pg_indexes WHERE schemaname = 'kb'")]
+    assert any("UNIQUE" in d and "(manufacturer_id, model_key)" in d for d in defs), defs
+    assert any("gin_trgm_ops" in d for d in defs), defs
+    assert any("document_models" in d and "(model_key, document_id)" in d for d in defs), defs
+    assert any("sections" in d and "WHERE is_live" in d for d in defs), defs
 
 
 def test_no_cascade_or_set_null_foreign_keys():
     migrate_ok()
     assert EXPECTED_TABLES <= table_names()  # the schema is there, so an empty result below means something
-    bad = rows(
-        "SELECT table_name, constraint_name, delete_rule, update_rule FROM information_schema.referential_constraints "
-        "WHERE constraint_schema = DATABASE() AND (delete_rule IN ('CASCADE','SET NULL','SET DEFAULT') "
-        "OR update_rule IN ('CASCADE','SET NULL','SET DEFAULT'))")
+    bad = rows("SELECT conrelid::regclass::text, conname FROM pg_constraint WHERE contype = 'f' "
+               "AND connamespace IN ('crawl'::regnamespace, 'kb'::regnamespace) "
+               "AND (confdeltype IN ('c', 'n', 'd') OR confupdtype IN ('c', 'n', 'd'))")
     assert bad == []
+
+
+def test_kb_has_no_foreign_keys_into_crawl():
+    migrate_ok()
+    into_crawl = rows("SELECT conrelid::regclass::text, conname FROM pg_constraint WHERE contype = 'f' "
+                      "AND connamespace = 'kb'::regnamespace "
+                      "AND confrelid IN (SELECT oid FROM pg_class WHERE relnamespace = 'crawl'::regnamespace)")
+    assert into_crawl == []
 
 
 def test_rerunning_migrate_changes_nothing():
@@ -135,6 +154,7 @@ def test_rerunning_migrate_changes_nothing():
 
     second = run_migrate()
     assert second.returncode == 0, second.stdout + second.stderr
+    assert "already applied" in second.stdout
 
     after = snapshot()
     for part in before:

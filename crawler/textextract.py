@@ -13,9 +13,12 @@ from pathlib import Path
 from selectolax.lexbor import LexborHTMLParser
 
 PDF_MAX_PAGES = 200
-PDF_TIMEOUT_SECONDS = 60
+PDF_TIMEOUT_SECONDS = 180  # big Ruud manuals took 63-109 s to read (text, tables, drawn-text check); 60 s cut them off
+LAYOUT_TIMEOUT_SECONDS = 180  # text and layout of up to 200 pages in one pass
 PDF_MEMORY_BYTES = 1024 ** 3
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
+DRAWN_TEXT_SHARE = 0.2  # this share of a PDF's text lines drawn as shapes: its text layer is fragments, treat as a scan
+DRAWN_TEXT_MIN_LINES = 5
 
 _LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                             "ﬅ": "st", "ﬆ": "st", " ": " "})
@@ -34,11 +37,12 @@ class ExtractError(Exception):
 class Extracted:
     pages: list = field(default_factory=list)
     title: str = None
+    drawn_text: bool = False  # text drawn as shapes: the pages with drawn lines are left empty (drawn_pages)
 
 
 def clean(text):
-    """Ligatures fixed, runs of spaces collapsed per line, blank lines dropped. Same words give the same text."""
-    text = text.translate(_LIGATURES).replace("\x00", "")
+    """Ligatures fixed, glyphs with no text map (`(cid:31)`) dropped, runs of spaces collapsed per line, blank lines dropped. Same words give the same text."""
+    text = re.sub(r"\(cid:\d+\)", "", text.translate(_LIGATURES).replace("\x00", ""))  # a glyph with no text
     text = text.encode("utf-8", "ignore").decode("utf-8")
     lines = []
     for line in text.splitlines():
@@ -95,15 +99,68 @@ def _children(node):
         child = child.next
 
 
+def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
+    """Per page, the text lines with font size and boldness, and the ruled tables, in reading order (for sections)."""
+    raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
+    try:
+        layout = raw["layout"]
+    except KeyError as exc:
+        raise ExtractError("the PDF reader gave an unusable answer") from exc
+    blank = drawn_pages(raw.get("rows"))
+    pages = []
+    for number, page in enumerate(layout[:max_pages]):
+        items = []
+        if number in blank:
+            pages.append(items)
+            continue
+        for item in page:
+            if item.get("kind") == "table":
+                items.append({"kind": "table", "rows": [[clean(c) for c in row] for row in item.get("rows", [])]})
+            else:
+                text = clean(item.get("text", ""))
+                if text:
+                    items.append({"kind": "text", "text": text, "size": float(item.get("size") or 0),
+                                  "bold": bool(item.get("bold"))})
+        pages.append(items)
+    return pages
+
+
 def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
     """Parsed in a child process with a time and memory limit; over-long documents are cut."""
+    raw = _run_child(data, [str(max_pages)], timeout, memory)
+    blank = drawn_pages(raw.get("rows"))
+    return Extracted(pages=["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])], title=None,
+                     drawn_text=bool(blank))
+
+
+def drawn_pages(rows):
+    """Indexes of the pages whose text layer is fragments: when the document has drawn text (drawn_text), each page with
+    any drawn line. A Ruud IOM's English pages are real text while its Spanish and French pages are outlines; the
+    warranty that started this has drawn lines on every page."""
+    if not drawn_text(rows):
+        return set()
+    return {n for n, row in enumerate(rows or []) if int(row[0] or 0) > 0}
+
+
+def drawn_text(rows):
+    """True when enough of the PDF's text lines are drawn as shapes (pdfchild.drawn_rows) that its text is fragments.
+    Decided for the whole document: a page of a few drawn labels on a diagram is normal."""
+    try:
+        drawn = sum(int(d) for d, _ in rows or [])
+        real = sum(int(r) for _, r in rows or [])
+    except (TypeError, ValueError):
+        return False
+    return drawn >= DRAWN_TEXT_MIN_LINES and drawn >= DRAWN_TEXT_SHARE * (drawn + real)
+
+
+def _run_child(data, args, timeout, memory):
     def limit():
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
 
     child = Path(__file__).with_name("pdfchild.py")
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}  # none of the container's secrets
     try:
-        proc = subprocess.Popen([sys.executable, "-I", str(child), str(max_pages)], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([sys.executable, "-I", str(child), *args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limit,
                                 start_new_session=True)
     except OSError as exc:
@@ -118,30 +175,42 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
         raise ExtractError("could not read the PDF")
     if len(out) > PDF_MAX_OUTPUT_BYTES:
         raise ExtractError("the PDF has too much text")
-    done = type("Done", (), {"stdout": out})
     try:
-        pages = json.loads(done.stdout)["pages"]
-    except (ValueError, KeyError) as exc:
+        answer = json.loads(out)
+        answer["pages"]
+    except (ValueError, KeyError, TypeError) as exc:
         raise ExtractError("the PDF reader gave an unusable answer") from exc
-    return Extracted(pages=[clean(p) for p in pages[:max_pages]], title=None)
+    return answer
 
 
-def index_page(conn, page_id, body, *, is_pdf):
-    """Store the page's text (one row per page of the document) and decide: queue it for AI, or skip it."""
+_WORD = re.compile(r"[A-Za-z]{2,}")
+
+
+def has_text(text):
+    """False for a page with no real text layer (a scan): fewer than three words of two or more letters."""
+    return len(_WORD.findall(text)) >= 3
+
+
+def index_page(conn, page_id, body, *, is_pdf, found=None):
+    """Store the page's text (one row per page of the document) and decide: queue it for AI, or skip it.
+    found: the text already read from this body (the same PDF at several addresses is read once)."""
     from crawler import extract
 
-    try:
-        found = extract_pdf(body) if is_pdf else extract_html(body)
-    except ExtractError:
-        _exec(conn, "UPDATE pages SET extraction_status = 'failed' WHERE id = %s", (page_id,))
-        return
+    if found is None:
+        try:
+            found = extract_pdf(body) if is_pdf else extract_html(body)
+        except ExtractError:
+            _exec(conn, "UPDATE pages SET extraction_status = 'failed' WHERE id = %s", (page_id,))
+            return
     texts = found.pages
     for number, text in enumerate(texts, start=1):
         _exec(conn,
-              "INSERT INTO page_text (page_id, page_number, title, text_sha, body) VALUES (%s, %s, %s, %s, %s) "
-              "ON DUPLICATE KEY UPDATE title = VALUES(title), text_sha = VALUES(text_sha), body = VALUES(body)",
-              (page_id, number, (found.title or "")[:500] or None, hashlib.sha256(text.encode("utf-8")).hexdigest(), text))
-    chosen = extract.select_pages(texts)
+              "INSERT INTO page_text (page_id, page_number, title, text_sha, body, has_text) VALUES (%s, %s, %s, %s, %s, %s) "
+              "ON CONFLICT (page_id, page_number) DO UPDATE SET title = EXCLUDED.title, text_sha = EXCLUDED.text_sha, "
+              "body = EXCLUDED.body, has_text = EXCLUDED.has_text",
+              (page_id, number, (found.title or "")[:500] or None, hashlib.sha256(text.encode("utf-8")).hexdigest(), text,
+               has_text(text)))
+    chosen = extract.pick_pages(texts) if is_pdf else []  # only PDFs are read by the AI
     if not chosen:
         status = "skipped"
     else:

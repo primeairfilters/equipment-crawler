@@ -49,12 +49,14 @@ def tracked(conn, models, host="ruud.test"):
 def add_es_models(conn, manufacturer_name, models):
     from crawler.store import alias_key
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO manufacturers (name, name_key) VALUES (%s, %s) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
+        cur.execute("INSERT INTO manufacturers (name, name_key) VALUES (%s, %s) "
+                    "ON CONFLICT (name_key) DO UPDATE SET name_key = EXCLUDED.name_key RETURNING id",
                     (manufacturer_name, alias_key(manufacturer_name)))
-        mid = cur.lastrowid
+        mid = cur.fetchone()[0]
         for m in models:
-            cur.execute("INSERT INTO equipment_models (manufacturer_id, model_number, model_key, energy_star_confirmed) "
-                        "VALUES (%s, %s, %s, 1) ON DUPLICATE KEY UPDATE energy_star_confirmed = 1", (mid, m, m))
+            cur.execute("INSERT INTO models (manufacturer_id, model_number, model_key, energy_star_confirmed) "
+                        "VALUES (%s, %s, %s, true) ON CONFLICT (manufacturer_id, model_key) DO UPDATE SET energy_star_confirmed = true",
+                        (mid, m, m))
 
 
 def run(conn, fake, name, **kw):
@@ -105,13 +107,11 @@ def test_sonnet_is_used_when_haiku_cannot_search_the_web(runtime_conn):
     assert [s[1] for s in fake.searches()] == [SONNET]
 
 
-def test_models_that_already_have_specs_are_not_searched(runtime_conn):
-    from crawler.store import save_document
+def test_models_that_already_have_a_document_are_not_searched(runtime_conn):
+    from p3support import linked_doc
     done, todo = fam("D"), fam("T")
     name, brand_id = tracked(runtime_conn, [model(done), model(todo)])
-    save_document(runtime_conn, brand_id=brand_id, source_url="https://ruud.test/a", title="t", content_sha="a" * 64,
-                  extracted_by="rules", models=[{"model_number": model(done), "is_base_model": False,
-                                                 "specs": [{"key": "seer2", "value": "15.2", "unit": None}]}])
+    linked_doc(runtime_conn, name, model(done))
     fake = FakeGapAI()
     run(runtime_conn, fake, name)
     assert len(fake.searches()) == 1
@@ -266,14 +266,14 @@ def test_a_second_gap_fill_at_the_same_time_is_refused(runtime_conn):
     other = connect("runtime", autocommit=True)
     try:
         with other.cursor() as cur:
-            cur.execute("SELECT GET_LOCK('crawler-gapfill', 0)")
-            assert cur.fetchone()[0] == 1  # the other run holds the lock
+            cur.execute("SELECT pg_try_advisory_lock(hashtext('crawler-gapfill'))")
+            assert cur.fetchone()[0] is True  # the other run holds the lock
         fake = FakeGapAI()
         with pytest.raises(RuntimeError):
             gap_fill(runtime_conn, fake, brand=name, now=T0)
         assert fake.calls == []
         with other.cursor() as cur:
-            cur.execute("SELECT RELEASE_LOCK('crawler-gapfill')")
+            cur.execute("SELECT pg_advisory_unlock(hashtext('crawler-gapfill'))")
     finally:
         other.close()
     run(runtime_conn, FakeGapAI(), name)  # control: once released it runs

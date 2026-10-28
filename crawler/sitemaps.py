@@ -75,8 +75,9 @@ def read_sitemaps(conn, fetcher, brand_name, *, max_urls=MAX_SITEMAP_URLS):
                     or not any(host == h and path.startswith(p) for h, p in sections)):
                 continue
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO start_urls (brand_id, url, url_sha, found_by) VALUES (%s, %s, %s, 'sitemap') "
-                            "ON DUPLICATE KEY UPDATE id = id",
+                # a listed page is its own start, so one link deep reaches its documents (D60)
+                cur.execute("INSERT INTO start_urls (brand_id, url, url_sha, found_by, depth) VALUES (%s, %s, %s, 'sitemap', 1) "
+                            "ON CONFLICT (brand_id, url_sha) DO NOTHING",
                             (brand_id, loc, hashlib.sha256(loc.encode("utf-8")).hexdigest()))
                 added += 1 if cur.rowcount == 1 else 0
 

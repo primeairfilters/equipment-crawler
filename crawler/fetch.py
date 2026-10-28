@@ -1,10 +1,12 @@
 """The polite, safe fetcher.
 
 One request at a time, at least 10 seconds between requests to a host, robots.txt obeyed
-(RFC 9309), approved hosts only, public addresses only (resolved once per request and connected
-to by that address), caps counted on decoded bytes. State that must outlive the process (the
-gap, the rest period, the robots cache, the page hashes) lives in the database. Nothing here
-commits; the caller does.
+(RFC 9309) unless the user switched it off for that host (D67), approved hosts only, public
+addresses only (resolved once per request and connected to by that address), caps counted on
+decoded bytes. A host switched to the browser has its web pages rendered in headless Chromium
+(D68a, crawler/render.py) under the same gap and address rules. State that must outlive the
+process (the gap, the rest period, the robots cache, the page hashes) lives in the database.
+Nothing here commits; the caller does.
 """
 import hashlib
 import ipaddress
@@ -19,6 +21,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 import httpx
 from protego import Protego
 
+from crawler import library
 from crawler.hosts import in_scope, is_refused_host, normalize_host
 from crawler.netpolicy import is_public_ip
 
@@ -54,6 +57,7 @@ class Result:
     url: str = None
     is_pdf: bool = False
     page_id: int = None
+    mime: str = None
 
 
 class _Refused(Exception):
@@ -131,13 +135,22 @@ def _xml_body_limit(status, headers):
     return _body_limit(status, headers)
 
 
+def _feed_body_limit(status, headers):
+    """Document feeds (D68b): JSON from a brand's approved host, under the same cap as ENERGY STAR pages."""
+    return _json_body_limit(status, headers)
+
+
+LIMITS = {"page": _body_limit, "xml": _xml_body_limit, "json": _feed_body_limit}
+
+
 class Fetcher:
-    def __init__(self, conn, *, resolver=None, now=None, sleep=None, ip_allowed=None):
+    def __init__(self, conn, *, resolver=None, now=None, sleep=None, ip_allowed=None, renderer=None):
         self.conn = conn
         self.resolver = resolver or _default_resolver
         self.now = now or _default_now
         self.sleep = sleep or time.sleep
         self.ip_allowed = ip_allowed or is_public_ip
+        self.renderer = renderer  # made on first use, so a crawl with no browser host never loads Playwright
 
     # ------------------------------------------------------------ database helpers
 
@@ -155,17 +168,17 @@ class Fetcher:
             "SELECT host FROM brand_domains WHERE brand_id = %s AND status = 'approved'", (brand_id,))]
 
     def _host_row(self, host):
-        self._exec("INSERT INTO hosts (host) VALUES (%s) ON DUPLICATE KEY UPDATE host = host", (host,))
-        row = self._rows("SELECT id, rest_until FROM hosts WHERE host = %s", (host,))[0]
-        return {"id": row[0], "rest_until": row[1]}
+        self._exec("INSERT INTO hosts (host) VALUES (%s) ON CONFLICT (host) DO NOTHING", (host,))
+        row = self._rows("SELECT id, rest_until, ignore_robots, use_browser FROM hosts WHERE host = %s", (host,))[0]
+        return {"id": row[0], "rest_until": row[1], "ignore_robots": row[2], "use_browser": row[3]}
 
     def _page(self, brand_id, url):
         rows = self._rows(
-            "SELECT id, content_sha, etag, last_modified FROM pages WHERE brand_id = %s AND url_sha = %s",
+            "SELECT id, content_sha, etag, last_modified, is_pdf FROM pages WHERE brand_id = %s AND url_sha = %s",
             (brand_id, _sha(url)))
         if not rows:
             return None
-        return {"id": rows[0][0], "content_sha": rows[0][1], "etag": rows[0][2], "last_modified": rows[0][3]}
+        return {"id": rows[0][0], "content_sha": rows[0][1], "etag": rows[0][2], "last_modified": rows[0][3], "is_pdf": rows[0][4]}
 
     def due_info(self, brand_id, url):
         """(due, page_id). Not due when the page was checked recently and its next check is still ahead."""
@@ -187,9 +200,7 @@ class Fetcher:
                 cols["fail_count"] = 1
             names = ", ".join(cols)
             marks = ", ".join(["%s"] * len(cols))
-            with self.conn.cursor() as cur:
-                cur.execute(f"INSERT INTO pages ({names}) VALUES ({marks})", tuple(cols.values()))
-                return cur.lastrowid
+            return self._rows(f"INSERT INTO pages ({names}) VALUES ({marks}) RETURNING id", tuple(cols.values()))[0][0]
         sets = [f"{name} = %s" for name in cols]
         values = list(cols.values())
         if parent_id is not None:
@@ -214,11 +225,32 @@ class Fetcher:
 
     # ------------------------------------------------------------ one request
 
-    def _get(self, host_id, target, headers, limit_for):
-        """One GET to one host: resolve once, wait out the gap, connect to that address."""
+    def _wait_gap(self, host_id):
         waits = self._rows("SELECT next_allowed_at FROM hosts WHERE id = %s", (host_id,))[0][0]
         if waits is not None and waits > self.now():
             self.sleep((waits - self.now()).total_seconds())
+
+    def _render(self, host_id, url, approved):
+        """One page through headless Chromium, after the same gap as any request to the host. Raw, with the final URL."""
+        from crawler.render import RenderError, Renderer
+        self._wait_gap(host_id)
+        if self.renderer is None:
+            self.renderer = Renderer()
+        try:
+            page = self.renderer.render(url, resolver=self.resolver, ip_allowed=self.ip_allowed, approved_hosts=approved,
+                                        user_agent=USER_AGENT)
+        except RenderError as exc:
+            raise _ConnError(str(exc)) from exc
+        finally:
+            self._exec("UPDATE hosts SET last_request_at = %s, next_allowed_at = %s WHERE id = %s",
+                       (self.now(), _ceil_second(self.now() + timedelta(seconds=GAP_SECONDS)), host_id))
+        too_big = len(page.html) > MAX_HTML_BYTES
+        headers = httpx.Headers({"content-type": page.content_type or "text/html; charset=utf-8"})
+        return Raw(page.status, headers, None if too_big else page.html, too_big), page.final_url
+
+    def _get(self, host_id, target, headers, limit_for):
+        """One GET to one host: resolve once, wait out the gap, connect to that address."""
+        self._wait_gap(host_id)
 
         try:
             ips = list(self.resolver(target.host))
@@ -295,6 +327,8 @@ class Fetcher:
             status, body = self._fetch_robots(host_id, target, approved)
             self._exec("UPDATE hosts SET robots_status = %s, robots_body = %s, robots_fetched_at = %s WHERE id = %s",
                        (status, body, self.now(), host_id))
+        if self._rows("SELECT ignore_robots FROM hosts WHERE id = %s", (host_id,))[0][0]:
+            return True  # the user's per-host switch (D67); the gap and the honest agent still apply
         if status is None or status == 0 or status >= 500 or 300 <= status < 400:
             return False
         if 400 <= status < 500:
@@ -384,7 +418,9 @@ class Fetcher:
         self._host_ok(host_id)
         return Result("fetched", http_status=raw.status, body=raw.body, url=url)
 
-    def fetch(self, url, brand_id, *, depth=0, start_url_id=None, parent_id=None, xml=False):
+    def fetch(self, url, brand_id, *, depth=0, start_url_id=None, parent_id=None, xml=False, kind=None):
+        """kind: 'page' (HTML or PDF), 'xml' (sitemaps) or 'json' (document feeds). xml=True is the older spelling."""
+        kind = kind or ("xml" if xml else "page")
         url = urldefrag((url or "").strip())[0]
         if len(url) > MAX_URL_LENGTH:
             return Result("refused", "url", url=url)
@@ -399,7 +435,7 @@ class Fetcher:
                                    parent_id)
 
         def failed(reason, status=None, host_failure=False):
-            cols = {"next_check_at": self.now() + RETRY_FAILED_AFTER}
+            cols = {"next_check_at": self.now() + RETRY_FAILED_AFTER, "fetch_state": "failed"}
             if status is not None:
                 cols["http_status"] = status
             page_id = save(cols, bump_fail=True)
@@ -421,12 +457,27 @@ class Fetcher:
                     self._exec("UPDATE hosts SET failure_count = 0, rest_until = NULL WHERE id = %s", (host_id,))
                 if not self._robots_allows(host_id, target, current, approved):
                     raise _Refused("robots")
-                if hop == 0 and existing and existing["content_sha"]:
-                    if existing["etag"]:
-                        conditional["If-None-Match"] = existing["etag"]
-                    if existing["last_modified"]:
-                        conditional["If-Modified-Since"] = existing["last_modified"]
-                raw = self._get(host_id, target, conditional, _xml_body_limit if xml else _body_limit)
+                if kind == "page" and row["use_browser"] and not current.lower().split("?")[0].endswith(".pdf"):
+                    raw, final = self._render(host_id, current, approved)
+                    if raw.status in range(200, 300) and not raw.headers.get("content-type", "").startswith("text/html"):
+                        raw = self._get(host_id, target, {}, _body_limit)  # not a web page after all: plain HTTP
+                    elif final and final != current:
+                        try:
+                            landed = self._target(final, approved)
+                        except _Refused:
+                            raise _Refused("scope")
+                        if landed.host != target.host:  # the browser was redirected: that host's robots.txt counts too
+                            if not self._robots_allows(self._host_row(landed.host)["id"], landed, final, approved):
+                                raise _Refused("robots")
+                        current = final
+                else:
+                    if hop == 0 and existing and existing["content_sha"] and (
+                            not existing["is_pdf"] or not library.configured() or library.has_file(existing["content_sha"])):
+                        if existing["etag"]:
+                            conditional["If-None-Match"] = existing["etag"]
+                        if existing["last_modified"]:
+                            conditional["If-Modified-Since"] = existing["last_modified"]
+                    raw = self._get(host_id, target, conditional, LIMITS[kind])
             except _Refused as refused:
                 return Result("refused", refused.reason, url=current)
             except _ConnError:
@@ -441,7 +492,8 @@ class Fetcher:
 
             now = self.now()
             if raw.status == 304 and conditional:
-                page_id = save({"fetched_at": now, "next_check_at": now + RECHECK_AFTER, "fail_count": 0})
+                page_id = save({"fetched_at": now, "next_check_at": now + RECHECK_AFTER, "fail_count": 0,
+                                "fetch_state": "fetched", "final_url": current})
                 self._host_ok(host_id)
                 return Result("not_modified", http_status=304, url=current, page_id=page_id)
             if not 200 <= raw.status < 300:
@@ -452,8 +504,7 @@ class Fetcher:
             if raw.body is None:
                 return failed("bad_content_type", raw.status)
 
-            kind = raw.headers.get("content-type", "").split(";")[0].strip().lower()
-            is_pdf = kind == "application/pdf"
+            is_pdf = kind_of(raw.headers) == "application/pdf"
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
 
@@ -464,10 +515,13 @@ class Fetcher:
                 "etag": (raw.headers.get("etag") or None) and raw.headers.get("etag")[:255],
                 "last_modified": (raw.headers.get("last-modified") or None) and raw.headers.get("last-modified")[:100],
                 "content_sha": sha,
-                "is_pdf": 1 if is_pdf else 0,
+                "is_pdf": is_pdf,
+                "server_date": (raw.headers.get("date") or None) and raw.headers.get("date")[:100],
                 "fetched_at": now,
                 "next_check_at": now + RECHECK_AFTER,
                 "fail_count": 0,
+                "fetch_state": "fetched",
+                "final_url": current,
             }
             unchanged = existing is not None and existing["content_sha"] == sha
             if not unchanged:
@@ -475,11 +529,16 @@ class Fetcher:
             page_id = save(cols)
             self._host_ok(host_id)
             if unchanged:
-                return Result("not_modified", http_status=raw.status, url=current, is_pdf=is_pdf, page_id=page_id)
+                return Result("not_modified", http_status=raw.status, url=current, is_pdf=is_pdf, page_id=page_id,
+                              body=raw.body if is_pdf else b"", mime=kind_of(raw.headers))
             return Result("fetched", http_status=raw.status, body=raw.body, url=current, is_pdf=is_pdf,
-                          page_id=page_id)
+                          page_id=page_id, mime=kind_of(raw.headers))
 
         return failed("redirects")
+
+
+def kind_of(headers):
+    return headers.get("content-type", "").split(";")[0].strip().lower()
 
 
 def _sha(url):

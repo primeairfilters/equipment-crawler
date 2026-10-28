@@ -150,12 +150,13 @@ def test_after_a_rest_expires_one_failure_does_not_start_another_rest(ruud):
 def test_run_calls_after_page_once_per_page(ruud):
     from crawler.brands import add_start_url
     from crawler.crawl import run
+    from p11support import Checker
     add_start_url(ruud.conn, ruud.brand, ruud.url("ruud.test", "/start"))
     ruud.site.route("/start", b'<a href="/a">a</a><a href="/b">b</a>', headers=HTML_HEADERS)
     ruud.site.route("/a", HTML, headers=HTML_HEADERS)
     ruud.site.route("/b", HTML, headers=HTML_HEADERS)
     calls = []
-    run(ruud.conn, ruud.fetcher(), brand=ruud.brand, after_page=lambda: calls.append(1))
+    run(ruud.conn, ruud.fetcher(), brand=ruud.brand, link_checker=Checker(), after_page=lambda: calls.append(1))
     pages = [r["path"] for r in ruud.site.page_hits()]
     assert sorted(pages) == ["/a", "/b", "/start"]  # the crawl ran
     assert len(calls) == 3
@@ -164,6 +165,7 @@ def test_run_calls_after_page_once_per_page(ruud):
 def test_run_without_a_callback_still_works(ruud):
     from crawler.brands import add_start_url
     from crawler.crawl import run
+    from p11support import Checker
     add_start_url(ruud.conn, ruud.brand, ruud.url("ruud.test", "/p"))
-    run(ruud.conn, ruud.fetcher(), brand=ruud.brand)
+    run(ruud.conn, ruud.fetcher(), brand=ruud.brand, link_checker=Checker())
     assert [r["path"] for r in ruud.site.page_hits()] == ["/p"]

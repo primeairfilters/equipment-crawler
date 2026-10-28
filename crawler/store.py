@@ -1,14 +1,16 @@
-"""Writes checked facts into the equipment tables. One document is all or nothing. Nothing commits."""
-import hashlib
+"""Writes a tagged document into kb: the document (one per unique PDF), where it was found, and its models.
+One document is all or nothing. Nothing commits.
+"""
 import re
-from decimal import Decimal, InvalidOperation
 
-# An ENERGY STAR model "has specs" when its manufacturer has a model with current specs whose key is a prefix
-# of its own (or equal): a table for the base model RA1424AJ covers RA1424AJ1NA. Used as `AND NOT EXISTS (...)`.
-HAS_NO_SPECS_SQL = (
-    "NOT EXISTS (SELECT 1 FROM equipment_models b JOIN equipment_specs s ON s.model_id = b.id "
-    "WHERE b.manufacturer_id = em.manufacturer_id AND LENGTH(b.model_key) >= 5 "
-    "AND em.model_key LIKE CONCAT(b.model_key, '%%') AND s.superseded = 0 AND s.hidden_at IS NULL)"
+# An ENERGY STAR model "has a document" when a document with a doc_type (other than not_equipment) is linked to a model
+# of its manufacturer whose key (5+ characters) is a prefix of its own or equal: a document on RA1424AJ covers RA1424AJ1NA.
+# Used as `AND NOT EXISTS (...)` with the ENERGY STAR model aliased `em`.
+HAS_NO_DOCUMENT_SQL = (
+    "NOT EXISTS (SELECT 1 FROM document_models dm JOIN documents d ON d.id = dm.document_id "
+    "WHERE dm.manufacturer_id = em.manufacturer_id AND length(dm.model_key) >= 5 "
+    "AND left(em.model_key, length(dm.model_key)) = dm.model_key "
+    "AND d.doc_type IS NOT NULL AND d.doc_type <> 'not_equipment')"
 )
 
 ALLOWED_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5")
@@ -44,23 +46,24 @@ def _rows(conn, sql, args=()):
         return cur.fetchall()
 
 
-def _upsert_id(conn, sql, args):
+def _one(conn, sql, args):
     with conn.cursor() as cur:
         cur.execute(sql, args)
-        return cur.lastrowid
+        return cur.fetchone()[0]
 
 
-def _number(value):
-    if not re.fullmatch(r"-?\d{1,13}(\.\d{1,4})?", value):
-        return None
-    try:
-        return Decimal(value)
-    except InvalidOperation:
-        return None
+def conn_exec(conn, sql, args=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
 
 
-def value_key(value):
-    return hashlib.sha256(" ".join(str(value).split()).lower().encode("utf-8")).hexdigest()
+def _new_manufacturer(conn, name, key):
+    manufacturer_id = _one(
+        conn, "INSERT INTO manufacturers (name, name_key) VALUES (%s, %s) "
+              "ON CONFLICT (name_key) DO UPDATE SET name_key = EXCLUDED.name_key RETURNING id", (name, key))
+    conn_exec(conn, "INSERT INTO manufacturer_aliases (manufacturer_id, alias, alias_key) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (alias_key) DO NOTHING", (manufacturer_id, name, key))
+    return manufacturer_id
 
 
 def manufacturer_for(conn, name):
@@ -71,80 +74,85 @@ def manufacturer_for(conn, name):
     found = _rows(conn, "SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s", (key,))
     if found:
         return found[0][0]
-    short = (name or "").split(",")[0].strip()[:190]
-    manufacturer_id = _upsert_id(
-        conn, "INSERT INTO manufacturers (name, name_key) VALUES (%s, %s) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
-        (short, key))
-    _upsert_id(conn, "INSERT INTO manufacturer_aliases (manufacturer_id, alias, alias_key) VALUES (%s, %s, %s) "
-                     "ON DUPLICATE KEY UPDATE id = id", (manufacturer_id, short, key))
-    return manufacturer_id
+    return _new_manufacturer(conn, (name or "").split(",")[0].strip()[:190], key)
 
 
-def _manufacturer(conn, brand_id):
+def brand_manufacturer(conn, brand_id):
     name = _rows(conn, "SELECT name FROM brands WHERE id = %s", (brand_id,))[0][0]
     key = alias_key(name)
     found = _rows(conn, "SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s", (key,))
     if found:
         return found[0][0]
-    manufacturer_id = _upsert_id(
-        conn, "INSERT INTO manufacturers (name, name_key) VALUES (%s, %s) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
-        (name, key))
-    _upsert_id(conn, "INSERT INTO manufacturer_aliases (manufacturer_id, alias, alias_key) VALUES (%s, %s, %s) "
-                     "ON DUPLICATE KEY UPDATE id = id", (manufacturer_id, name, key))
-    return manufacturer_id
+    return _new_manufacturer(conn, name, key)
 
 
-def _save_spec(conn, model_id, source_id, spec, extracted_by):
-    key = spec["key"]
-    value = str(spec["value"])
-    if len(value) > 500 or len(str(spec.get("unit") or "")) > 30 or len(key) > 100:
-        raise ValueError("a value is too long to store")
-    vkey = value_key(value)
-    existing = _rows(conn, "SELECT id, value_key, superseded FROM equipment_specs "
-                           "WHERE model_id = %s AND spec_key = %s AND source_id = %s", (model_id, key, source_id))
-    current = [r for r in existing if r[1] == vkey]
-    if current:
-        spec_id, _, superseded = current[0]
-        if not superseded:
-            return
-        conn_exec(conn, "UPDATE equipment_specs SET superseded = 0 WHERE id = %s", (spec_id,))
-    else:
-        spec_id = _upsert_id(
-            conn,
-            "INSERT INTO equipment_specs (model_id, source_id, spec_key, value_text, value_num, unit, value_key, extracted_by) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (model_id, source_id, key, value, _number(value), spec.get("unit"), vkey, extracted_by))
-    conn_exec(conn, "UPDATE equipment_specs SET superseded = 1 WHERE model_id = %s AND spec_key = %s "
-                    "AND source_id = %s AND id <> %s AND superseded = 0", (model_id, key, source_id, spec_id))
+def save_model(conn, manufacturer_id, number, *, is_base_model=False, energy_star=False):
+    """The model's id; made if new. energy_star=True marks it confirmed by ENERGY STAR."""
+    return _one(
+        conn,
+        "INSERT INTO models (manufacturer_id, model_number, model_key, is_base_model, energy_star_confirmed) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (manufacturer_id, model_key) DO UPDATE SET "
+        "energy_star_confirmed = models.energy_star_confirmed OR EXCLUDED.energy_star_confirmed RETURNING id",
+        (manufacturer_id, number[:190], model_key(number)[:190], is_base_model, energy_star))
 
 
-def conn_exec(conn, sql, args=()):
-    with conn.cursor() as cur:
-        cur.execute(sql, args)
+TAG_COLUMNS = ("trade", "equipment_type", "language", "form_number")
 
 
-def save_document(conn, *, brand_id, source_url, title, content_sha, models, extracted_by):
+def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, models, extracted_by, doc_type=None,
+                  tags=None, tagger_version=None):
+    """Upsert the document for this content, record the URL it was found at, and link its models.
+
+    tags: trade / equipment_type / language / form_number (None values keep what is stored). A tagged document is
+    state 'tagged' unless it is already further along. Same manufacturer + form number links it to the document it
+    replaces (D55)."""
     check_extracted_by(extracted_by)
+    tags = {k: v for k, v in (tags or {}).items() if k in TAG_COLUMNS}
     conn_exec(conn, "SAVEPOINT save_document")
     try:
-        manufacturer_id = _manufacturer(conn, brand_id)
-        source_id = _upsert_id(
+        manufacturer_id = brand_manufacturer(conn, brand_id)
+        document_id = _one(
             conn,
-            "INSERT INTO equipment_sources (url, url_sha, title, content_sha) VALUES (%s, %s, %s, %s) "
-            "ON DUPLICATE KEY UPDATE title = VALUES(title), content_sha = VALUES(content_sha), id = LAST_INSERT_ID(id)",
-            (source_url, hashlib.sha256(source_url.encode("utf-8")).hexdigest(), title, content_sha))
+            "INSERT INTO documents (content_sha, manufacturer_id, title, canonical_url, doc_type, tagged_by, tagger_version, "
+            "trade, equipment_type, language, form_number, state) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'tagged') ON CONFLICT (content_sha) DO UPDATE SET "
+            "title = COALESCE(EXCLUDED.title, documents.title), doc_type = COALESCE(EXCLUDED.doc_type, documents.doc_type), "
+            "manufacturer_id = COALESCE(documents.manufacturer_id, EXCLUDED.manufacturer_id), "
+            "trade = COALESCE(EXCLUDED.trade, documents.trade), "
+            "equipment_type = COALESCE(EXCLUDED.equipment_type, documents.equipment_type), "
+            "language = COALESCE(EXCLUDED.language, documents.language), "
+            "form_number = COALESCE(EXCLUDED.form_number, documents.form_number), "
+            "tagged_by = EXCLUDED.tagged_by, tagger_version = COALESCE(EXCLUDED.tagger_version, documents.tagger_version), "
+            "state = CASE WHEN documents.state = 'new' THEN 'tagged' ELSE documents.state END, "
+            "updated_at = (now() AT TIME ZONE 'UTC') RETURNING id",
+            (content_sha, manufacturer_id, title, source_url, doc_type, extracted_by, tagger_version,
+             tags.get("trade"), tags.get("equipment_type"), tags.get("language"), tags.get("form_number")))
+        if tags.get("form_number"):
+            conn_exec(conn, "UPDATE documents d SET replaces_id = (SELECT o.id FROM documents o WHERE o.manufacturer_id = "
+                            "d.manufacturer_id AND o.form_number = d.form_number AND o.language IS NOT DISTINCT FROM "
+                            "d.language AND o.id <> d.id AND o.created_at <= d.created_at AND o.id < d.id "
+                            "ORDER BY o.id DESC LIMIT 1) WHERE d.id = %s AND d.replaces_id IS NULL",
+                      (document_id,))
+        # sections already built keep true copies of the tags; a manual retagged as not equipment leaves Breeze at once
+        conn_exec(conn, "UPDATE sections s SET manufacturer_id = d.manufacturer_id, trade = d.trade, "
+                        "equipment_type = d.equipment_type, doc_type = d.doc_type, language = d.language, "
+                        "is_live = s.is_live AND d.doc_type IS DISTINCT FROM 'not_equipment' FROM documents d "
+                        "WHERE d.id = %s AND s.document_id = d.id AND ((s.manufacturer_id, s.trade, s.equipment_type, "
+                        "s.doc_type, s.language) IS DISTINCT FROM (d.manufacturer_id, d.trade, d.equipment_type, d.doc_type, "
+                        "d.language) OR (s.is_live AND d.doc_type = 'not_equipment'))", (document_id,))
+        conn_exec(conn, "INSERT INTO document_urls (document_id, page_id, url) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (document_id, page_id) DO UPDATE SET last_seen_at = (now() AT TIME ZONE 'UTC')",
+                  (document_id, page_id, source_url))
         for entry in models:
-            model_id = _upsert_id(
-                conn,
-                "INSERT INTO equipment_models (manufacturer_id, model_number, model_key, is_base_model) "
-                "VALUES (%s, %s, %s, %s) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
-                (manufacturer_id, entry["model_number"], model_key(entry["model_number"]),
-                 1 if entry.get("is_base_model") else 0))
-            conn_exec(conn, "INSERT INTO equipment_model_sources (model_id, source_id) VALUES (%s, %s) "
-                            "ON DUPLICATE KEY UPDATE id = id", (model_id, source_id))
-            for spec in entry["specs"]:
-                _save_spec(conn, model_id, source_id, spec, extracted_by)
+            model_id = save_model(conn, manufacturer_id, entry["model_number"], is_base_model=bool(entry.get("is_base_model")))
+            if tags.get("trade") or tags.get("equipment_type"):
+                conn_exec(conn, "UPDATE models SET trade = COALESCE(trade, %s), equipment_type = COALESCE(equipment_type, %s) "
+                                "WHERE id = %s", (tags.get("trade"), tags.get("equipment_type"), model_id))
+            conn_exec(conn, "INSERT INTO document_models (document_id, model_id, model_key, manufacturer_id) "
+                            "VALUES (%s, %s, %s, %s) ON CONFLICT (document_id, model_id) DO NOTHING",
+                      (document_id, model_id, model_key(entry["model_number"])[:190], manufacturer_id))
     except Exception:
         conn_exec(conn, "ROLLBACK TO SAVEPOINT save_document")
         raise
     conn_exec(conn, "RELEASE SAVEPOINT save_document")
+    return document_id

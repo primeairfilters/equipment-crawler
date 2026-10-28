@@ -43,14 +43,6 @@ def test_discover_says_when_the_answer_was_not_usable(runtime_conn):
     assert run_discover(runtime_conn, FakeDiscoverAI("no idea"), name) == "unusable"
 
 
-def test_a_start_url_on_an_unlisted_host_also_stores_that_host_as_waiting(runtime_conn):
-    name, brand_id = new_brand(runtime_conn)
-    out = found(domains=["ruud.com"], starts=["https://www.ruud.com/a/", "https://catalog.newhost.test/b/"])
-    run_discover(runtime_conn, FakeDiscoverAI(out), name)
-    rows = {r[0]: r[1:3] for r in domains(runtime_conn, brand_id)}
-    assert rows == {"ruud.com": ("waiting", "ai"), "catalog.newhost.test": ("waiting", "ai")}  # no row for www.ruud.com
-
-
 @pytest.mark.parametrize("tokens,factor", [(100_000, 1), (100_001, 5)])
 def test_the_long_prompt_rate_is_on_by_default_and_can_be_turned_off(tokens, factor):
     from crawler.ai import cost

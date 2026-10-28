@@ -45,7 +45,8 @@ def tree(runtime_conn):
 
 def crawl(w):
     from crawler.crawl import run
-    run(w.conn, w.fetcher(), brand=w.brand)
+    from p11support import Checker
+    run(w.conn, w.fetcher(), brand=w.brand, link_checker=Checker())
 
 
 def counts(w):

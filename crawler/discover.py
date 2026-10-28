@@ -22,7 +22,10 @@ DISCOVER_SYSTEM = (
     "Use web search. Report only what you actually saw in search results:\n"
     "- domains: the brand's own web domains (host names only, like www.ruud.com).\n"
     "- document_hosts: other hosts that serve the brand's spec sheets, manuals or PDFs (like files.myrheem.com).\n"
-    "- start_urls: product listing pages on those hosts (the page that lists a family of products).\n"
+    "- start_urls: listing pages on the brand's own site (one of the domains above), one per product family: the page that "
+    "lists that family's products. Also include the brand's document library or literature page (where its manuals and "
+    "spec sheets are listed), if it has one.\n"
+    "Never use third-party manual sites (like manualslib.com) for any of these.\n"
     "Every entry needs evidence_url: the page where you saw it. Do not guess. Leave out anything you did not see.\n"
     "Never include ahridirectory.org or ahrinet.org. Answer with JSON only."
 )
@@ -117,33 +120,32 @@ def discover(conn, client, brand_name, *, now=None, cap_usd=None):
     _exec(conn,
           "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "
           "cache_write_tokens, searches, is_batch, rejected, cost_usd, created_at) "
-          "VALUES ('discover', %s, NULL, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)",
+          "VALUES ('discover', %s, NULL, %s, %s, %s, %s, %s, %s, false, %s, %s, %s)",
           (brand_id, model, reply.input_tokens, reply.output_tokens, reply.cache_read_tokens, reply.cache_write_tokens,
-           reply.searches, 0 if answer is not None else 1,
+           reply.searches, answer is None,
            ai.cost(model, reply.input_tokens, reply.output_tokens, searches=reply.searches, check_long=True), now))
     if answer is None:
         return "unusable"
 
+    own = set()
     for key in ("domains", "document_hosts"):
         for entry in _items(answer, key):
             host = _clean_host(entry.get("host"))
             if host is None:
                 continue
+            if key == "domains":
+                own.add(host)
             _exec(conn, "INSERT INTO brand_domains (brand_id, host, status, found_by, evidence_url) "
-                        "VALUES (%s, %s, 'waiting', 'ai', %s) ON DUPLICATE KEY UPDATE id = id",
+                        "VALUES (%s, %s, 'waiting', 'ai', %s) ON CONFLICT (brand_id, host) DO NOTHING",
                   (brand_id, host, _evidence(entry.get("evidence_url"))))
     for entry in _items(answer, "start_urls"):
         url = _clean_url(entry.get("url"))
         if url is None:
             continue
+        host = _clean_host(urlsplit(url).hostname or "")  # only the brand's own domains (or their subdomains) are kept
+        if not any(host == d or host.endswith("." + d) for d in own):
+            continue
         _exec(conn, "INSERT INTO start_urls (brand_id, url, url_sha, found_by) VALUES (%s, %s, %s, 'discover') "
-                    "ON DUPLICATE KEY UPDATE id = id", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
-        # a start URL on a host nothing else covers is proposed too, so it can be approved and fetched
-        host = _clean_host(urlsplit(url).hostname or "")
-        known = [r[0] for r in _rows(conn, "SELECT host FROM brand_domains WHERE brand_id = %s", (brand_id,))]
-        if host and not any(host == k or host.endswith("." + k) for k in known):
-            _exec(conn, "INSERT INTO brand_domains (brand_id, host, status, found_by, evidence_url) "
-                        "VALUES (%s, %s, 'waiting', 'ai', %s) ON DUPLICATE KEY UPDATE id = id",
-                  (brand_id, host, _evidence(entry.get("evidence_url"))))
+                    "ON CONFLICT (brand_id, url_sha) DO NOTHING", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
     _exec(conn, "UPDATE brands SET discovered_at = %s WHERE id = %s", (now, brand_id))
     return answer

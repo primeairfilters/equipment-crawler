@@ -41,13 +41,13 @@ def brand_text(name):
 
 def systems(world, refs):
     return q(world.conn, "SELECT ahri_ref, seer2, eer2, hspf2, cooling_capacity_btuh, heating_capacity_btuh, superseded "
-                         "FROM equipment_systems WHERE ahri_ref IN %s ORDER BY ahri_ref, id", (tuple(refs),))
+                         "FROM es_systems WHERE ahri_ref = ANY(%s) ORDER BY ahri_ref, id", (list(refs),))
 
 
 def members(world, ref):
     return set(q(world.conn,
-                 "SELECT m.role, em.model_key FROM equipment_system_members m JOIN equipment_systems s ON s.id = m.system_id "
-                 "JOIN equipment_models em ON em.id = m.model_id WHERE s.ahri_ref = %s AND s.superseded = 0", (ref,)))
+                 "SELECT m.role, em.model_key FROM es_system_members m JOIN es_systems s ON s.id = m.system_id "
+                 "JOIN models em ON em.id = m.model_id WHERE s.ahri_ref = %s AND NOT s.superseded", (ref,)))
 
 
 # ---------------------------------------------------------------- the constants
@@ -85,11 +85,9 @@ def test_a_pull_creates_systems_with_members_and_typed_ratings(w):
 
 def test_models_go_under_one_manufacturer_however_the_brand_is_written_and_are_marked_energy_star(w):
     from p3support import settle  # noqa: F401
-    from crawler.store import save_document
+    from p3support import linked_doc
     name, brand_id = new_brand(w.conn)
-    save_document(w.conn, brand_id=brand_id, source_url="https://x.test/a", title="t", content_sha="a" * 64,
-                  extracted_by="rules", models=[{"model_number": "RA15AZ24AJ3CA", "is_base_model": False,
-                                                 "specs": [{"key": "seer2", "value": "15.2", "unit": None}]}])
+    linked_doc(w.conn, name, "RA15AZ24AJ3CA")  # the crawl already knows this model, through a document
     before = q(w.conn, "SELECT id FROM manufacturers WHERE name_key = %s", (name.upper(),))
     assert len(before) == 1
 
@@ -100,7 +98,7 @@ def test_models_go_under_one_manufacturer_however_the_brand_is_written_and_are_m
     ]
     assert pull(w)["status"] == "pulled"
     assert q(w.conn, "SELECT id FROM manufacturers WHERE name_key = %s", (name.upper(),)) == before
-    rows = q(w.conn, "SELECT model_key, energy_star_confirmed FROM equipment_models WHERE manufacturer_id = %s ORDER BY model_key",
+    rows = q(w.conn, "SELECT model_key, energy_star_confirmed FROM models WHERE manufacturer_id = %s ORDER BY model_key",
              (before[0][0],))
     keys = [r[0] for r in rows]
     assert {"RA15AZ24AJ3CA", "RA15AZ30AJ3CA", "RA15AZ36AJ3CA", "RC24AFTN", "RC30AFTN", "RC36AFTN"} <= set(keys)
@@ -120,7 +118,7 @@ def test_rows_without_an_ahri_reference_are_skipped_and_counted(w):
     summary = pull(w)
     assert summary["rows"] == 3 and summary["skipped_no_ahri"] == 2 and summary["systems_added"] == 1
     assert systems(w, [good])[0][0] == good  # the good row went in, so the skipping above was selective
-    skipped = q(w.conn, "SELECT COUNT(*) FROM equipment_models WHERE model_key IN ('RA15AZ24AJ3CA', 'RA15AZ30AJ3CA')")[0][0]
+    skipped = q(w.conn, "SELECT COUNT(*) FROM models WHERE model_key IN ('RA15AZ24AJ3CA', 'RA15AZ30AJ3CA')")[0][0]
     assert skipped == 0
 
 
@@ -146,13 +144,13 @@ def test_a_new_rows_updated_time_with_identical_rows_changes_nothing(w):
                  es_row(brand_text(name), refs[1], "RA15AZ30AJ3CA", "RC30AFTN")]
     pull(w)
     before = systems(w, refs)
-    models_before = q(w.conn, "SELECT COUNT(*) FROM equipment_models")[0][0]
+    models_before = q(w.conn, "SELECT COUNT(*) FROM models")[0][0]
     w.es.updated_at += 3600
     again = pull(w)
     assert again["status"] == "pulled" and again["rows"] == 2
     assert again["systems_added"] == 0 and again["systems_changed"] == 0 and again["rows_unchanged"] == 2
     assert systems(w, refs) == before
-    assert q(w.conn, "SELECT COUNT(*) FROM equipment_models")[0][0] == models_before
+    assert q(w.conn, "SELECT COUNT(*) FROM models")[0][0] == models_before
 
 
 def test_a_changed_rating_adds_a_new_system_and_supersedes_the_old_one_and_going_back_brings_it_back(w):
@@ -187,7 +185,7 @@ def test_a_row_missing_from_a_later_pull_is_not_hidden(w):
     assert pull(w)["rows"] == 1
     assert [r[6] for r in systems(w, [gone])] == [0]
     assert members(w, gone) == {("outdoor", "RA15AZ30AJ3CA"), ("indoor", "RC30AFTN")}
-    assert q(w.conn, "SELECT hidden_at FROM equipment_models WHERE model_key = 'RA15AZ30AJ3CA'") == ((None,),)
+    assert q(w.conn, "SELECT hidden_at FROM models WHERE model_key = 'RA15AZ30AJ3CA'") == ((None,),)
 
 
 # ---------------------------------------------------------------- paging
@@ -252,17 +250,12 @@ def test_requests_carry_the_user_agent_and_keep_the_ten_second_gap(w):
 
 # ---------------------------------------------------------------- status
 
-def test_status_counts_energy_star_models_with_no_specs_yet(w):
-    from crawler.brands import status
-    from crawler.store import save_document
+def test_status_counts_energy_star_models_with_no_documents_yet(w):
+    from p3support import linked_doc, uncovered_count
     name, brand_id = new_brand(w.conn)
-    save_document(w.conn, brand_id=brand_id, source_url="https://x.test/a", title="t", content_sha="a" * 64, extracted_by="rules",
-                  models=[{"model_number": "RA15AZ24AJ3CA", "is_base_model": False,
-                           "specs": [{"key": "seer2", "value": "15.2", "unit": None}]}])
+    linked_doc(w.conn, name, "RA15AZ24AJ3CA")
     w.es.rows = [es_row(brand_text(name), ahri(), "RA15AZ24AJ3CA", "RC24AFTN"),
                  es_row(brand_text(name), ahri(), "RA15AZ30AJ3CA", "RC30AFTN")]
     pull(w)
-    mine = [r for r in status(w.conn) if r["brand"] == name]
-    assert len(mine) == 1
-    # confirmed models: RA15AZ24AJ3CA (has a spec), RA15AZ30AJ3CA, RC24AFTN, RC30AFTN (none)
-    assert mine[0]["es_models_without_specs"] == 3
+    # confirmed models: RA15AZ24AJ3CA (has a document), RA15AZ30AJ3CA, RC24AFTN, RC30AFTN (none)
+    assert uncovered_count(w.conn, name) == 3

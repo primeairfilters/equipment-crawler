@@ -1,4 +1,4 @@
-"""P1: the test guard refuses a non-test database and passes on tracforce_equipment_testing."""
+"""P1 (P10 on PostgreSQL): the test guard refuses a non-test database and passes on tracforce_equipment_testing."""
 import os
 import subprocess
 import sys
@@ -43,7 +43,7 @@ class FakeServer:
 
 
 def asked_server_for_database(server):
-    return any("select database()" in sql.lower() for sql in server.executed)
+    return any("select current_database()" in sql.lower() for sql in server.executed)
 
 
 def test_guard_refuses_a_database_the_server_calls_non_test():

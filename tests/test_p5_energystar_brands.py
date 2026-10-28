@@ -6,9 +6,9 @@ from test_p5_energystar import brand_text, pull, systems, w  # noqa: F401  (w is
 
 def maker_by_role(world, ref):
     return dict(q(world.conn,
-                  "SELECT m.role, f.name_key FROM equipment_system_members m JOIN equipment_systems s ON s.id = m.system_id "
-                  "JOIN equipment_models em ON em.id = m.model_id JOIN manufacturers f ON f.id = em.manufacturer_id "
-                  "WHERE s.ahri_ref = %s AND s.superseded = 0", (ref,)))
+                  "SELECT m.role, f.name_key FROM es_system_members m JOIN es_systems s ON s.id = m.system_id "
+                  "JOIN models em ON em.id = m.model_id JOIN manufacturers f ON f.id = em.manufacturer_id "
+                  "WHERE s.ahri_ref = %s AND NOT s.superseded", (ref,)))
 
 
 def test_the_indoor_unit_and_furnace_use_the_indoor_brand_when_the_row_gives_one(w):
@@ -53,4 +53,4 @@ def test_rows_with_no_usable_brand_are_skipped_and_counted_and_leave_nothing_beh
     assert [r[0] for r in systems(w, [good])] == [good]  # the good row went in, so the skipping was selective
     # nothing half-written: no system, and no model, for the rows that could not be placed
     assert systems(w, [bad1, bad2, bad3]) == ()
-    assert q(w.conn, "SELECT COUNT(*) FROM equipment_models WHERE model_key LIKE %s", ("XB1_CD%",))[0][0] == 0
+    assert q(w.conn, "SELECT COUNT(*) FROM models WHERE model_key LIKE %s", ("XB1_CD%",))[0][0] == 0

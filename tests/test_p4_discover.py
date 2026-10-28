@@ -145,6 +145,7 @@ def test_an_answer_of_the_wrong_shape_does_not_crash_and_stores_nothing_bad(runt
 def test_nothing_that_was_found_is_fetched_before_ok_and_ok_unlocks_it(runtime_conn):
     from crawler.brands import approve_host
     from crawler.crawl import run
+    from p11support import Checker
     from test_p2_fetch import World
     w = World(runtime_conn)
     try:
@@ -154,11 +155,11 @@ def test_nothing_that_was_found_is_fetched_before_ok_and_ok_unlocks_it(runtime_c
         run_discover(runtime_conn, FakeDiscoverAI(found_out), w.brand)
         assert domains(runtime_conn, w.brand_id)[0][:3] == ("ruud.test", "waiting", "ai")
 
-        run(runtime_conn, w.fetcher(), brand=w.brand)
+        run(runtime_conn, w.fetcher(), brand=w.brand, link_checker=Checker())
         assert w.site.requests == []  # not even robots.txt
 
         approve_host(runtime_conn, "ruud.test")
-        run(runtime_conn, w.fetcher(), brand=w.brand)
+        run(runtime_conn, w.fetcher(), brand=w.brand, link_checker=Checker())
         assert [r["path"] for r in w.site.page_hits()] == ["/start"]  # control: after ok the same start URL is fetched
     finally:
         w.site.stop()

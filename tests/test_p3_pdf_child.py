@@ -46,15 +46,19 @@ def test_the_pdf_child_gets_none_of_the_parents_secrets(monkeypatch):
     assert not [k for k in env if k.startswith(("EQ_", "ANTHROPIC", "OPENAI", "AWS_"))]
 
 
-def run_child(monkeypatch, page_text):
+def run_child(monkeypatch, page_text, closed=None):
     from crawler import pdfchild
 
     class Page:
         def extract_text(self):
             return page_text
 
+        def close(self):
+            if closed is not None:
+                closed.append(self)
+
     class Pdf:
-        pages = [Page()]
+        pages = [Page(), Page()]
 
         def __enter__(self):
             return self
@@ -65,6 +69,7 @@ def run_child(monkeypatch, page_text):
     fake = types.ModuleType("pdfplumber")
     fake.open = lambda handle: Pdf()
     monkeypatch.setitem(sys.modules, "pdfplumber", fake)
+    monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)  # the stand-in has no pdfminer underneath to hook
     monkeypatch.setattr(sys, "argv", ["pdfchild", "5"])
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4 stand-in")))
     out = io.StringIO()
@@ -75,12 +80,18 @@ def run_child(monkeypatch, page_text):
 
 def test_one_pages_text_is_cut_to_50000_characters(monkeypatch):
     pages = run_child(monkeypatch, "x" * 60_000)
-    assert len(pages) == 1
+    assert len(pages) == 2
     assert len(pages[0]) == 50_000
 
 
+def test_each_page_is_closed_once_read_so_a_big_manual_fits_in_memory(monkeypatch):
+    closed = []
+    run_child(monkeypatch, "text", closed)  # a 37 MB service manual peaked at 1.6 GB without this, 0.2 GB with it
+    assert len(closed) == 2
+
+
 def test_a_short_pages_text_is_left_alone(monkeypatch):
-    assert run_child(monkeypatch, "short text") == ["short text"]  # control: the cut is not applied to everything
+    assert run_child(monkeypatch, "short text") == ["short text", "short text"]  # control: the cut is not applied to everything
 
 
 def test_child_output_over_the_parents_limit_is_an_error(monkeypatch):

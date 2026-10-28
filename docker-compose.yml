@@ -1,12 +1,35 @@
 services:
+  pg:
+    image: pgvector/pgvector:0.8.7-pg18
+    env_file:
+      - ${HOME}/.config/tracforce-crawler/pg-root.env
+    command: ["postgres", "-c", "default_toast_compression=lz4", "-c", "timezone=UTC"]
+    volumes:
+      - eq-pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5433:5432"  # this Mac only, for DBeaver (log in as eq_readonly, see setup/pg-readonly.sh)
+    networks:
+      - crawler-net
+
   crawler:
     build: .
     env_file:
-      - ${HOME}/.config/tracforce-crawler/db.env
+      - ${HOME}/.config/tracforce-crawler/pg.env
       - path: ${HOME}/.config/tracforce-crawler/anthropic.env
+        required: false
+      - path: ${HOME}/.config/tracforce-crawler/openai.env
         required: false
     volumes:
       - .:/work:ro
+      - ${HOME}/Documents/equipment-crawler-docs:/docs
+    environment:
+      DOCS_DIR: /docs
     working_dir: /work
     mem_limit: 2g
     pids_limit: 256
@@ -14,10 +37,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      pg:
+        condition: service_healthy
     networks:
-      - hvac-network
+      - crawler-net
+
+volumes:
+  eq-pg-data:
 
 networks:
-  hvac-network:
-    name: hvacapp_hvac-network
-    external: true
+  crawler-net:

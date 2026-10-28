@@ -200,3 +200,11 @@ def test_something_that_is_not_xml_is_skipped(w):
     w.site.route("/good.xml", urlset(under(w, "good")), headers=XML)
     assert read(w) == 1
     assert w.site.hits("/notxml.xml")
+
+
+def test_a_start_address_from_a_sitemap_follows_one_link_deep(w):
+    """P11 (D60): every listed page is its own start address, so it only needs its own links (its PDFs), not depth 3."""
+    set_robots(w, f"Sitemap: {w.url('ruud.test', '/sitemap.xml')}")
+    w.site.route("/sitemap.xml", urlset(under(w, "a")), headers=XML)
+    assert read(w) == 1
+    assert q(w.conn, "SELECT depth FROM start_urls WHERE brand_id = %s AND url = %s", (w.brand_id, under(w, "a"))) == ((1,),)

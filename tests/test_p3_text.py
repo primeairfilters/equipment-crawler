@@ -81,46 +81,10 @@ def test_a_pdf_that_takes_too_long_is_stopped():
         extract_pdf(pdf, timeout=0.001)
 
 
-# ---------------------------------------------------------------- the free filter
-
-LABELLED = f"Model {MODEL}\nSEER2 15.2\nTonnage 2.0"
-
-
-def test_filter_keeps_the_pages_with_a_model_when_one_page_has_label_and_model():
-    from crawler.extract import select_pages
-    pages = ["Welcome to our website. Nothing to see.", f"Decoder: {MODEL} means brand, category, series", LABELLED]
-    assert select_pages(pages) == [1, 2]
-
-
-def test_filter_sends_nothing_when_there_are_labels_but_no_model_number():
-    from crawler.extract import select_pages
-    assert select_pages(["SEER2 and Tonnage and Refrigerant are explained here", "Efficiency is good"]) == []
-
-
-def test_filter_sends_nothing_when_there_is_a_model_number_but_no_spec_label():
-    from crawler.extract import select_pages
-    assert select_pages([f"Warranty list: {MODEL}, RA15AZ30AJ3CA", "Contact your dealer"]) == []
-
-
-def test_filter_needs_the_label_and_the_model_on_the_same_page():
-    from crawler.extract import select_pages
-    assert select_pages(["SEER2 Tonnage Refrigerant", f"Model {MODEL}"]) == []
-
-
-def test_filter_sends_at_most_twenty_pages():
-    from crawler.extract import select_pages
-    pages = [f"Model RA15AZ{n:02d}AJ3CA\nSEER2 15.2\nTonnage 2.0" for n in range(30)]
-    assert select_pages(pages) == list(range(20))
-
-
-def test_filter_of_an_empty_document_is_empty():
-    from crawler.extract import select_pages
-    assert select_pages([]) == []
-
-
 # ---------------------------------------------------------------- index_page: page_text rows and status
 
-def test_index_page_stores_the_text_and_queues_a_spec_page(runtime_conn):
+def test_index_page_stores_an_html_pages_text(runtime_conn):
+    """HTML text is kept for the free gap-fill check, and the page ends 'skipped': HTML is never AI-read."""
     name, brand_id = new_brand(runtime_conn)
     page_id = make_page(runtime_conn, brand_id, spec_html(MODEL))
     rows = q(runtime_conn, "SELECT page_number, title, text_sha, body FROM page_text WHERE page_id = %s", (page_id,))
@@ -128,6 +92,18 @@ def test_index_page_stores_the_text_and_queues_a_spec_page(runtime_conn):
     number, title, sha, body = rows[0]
     assert number == 1 and title == f"{MODEL} spec sheet"
     assert MODEL in body and "SEER2\t15.2" in body
+    assert sha == hashlib.sha256(body.encode()).hexdigest()
+    assert q(runtime_conn, "SELECT extraction_status FROM pages WHERE id = %s", (page_id,)) == (("skipped",),)
+
+
+def test_index_page_stores_a_pdfs_text_and_queues_it(runtime_conn):
+    from p3support import spec_pdf
+    name, brand_id = new_brand(runtime_conn)
+    page_id = make_page(runtime_conn, brand_id, spec_pdf(MODEL), is_pdf=True)
+    rows = q(runtime_conn, "SELECT page_number, text_sha, body FROM page_text WHERE page_id = %s", (page_id,))
+    assert len(rows) == 1
+    number, sha, body = rows[0]
+    assert number == 1 and MODEL in body and "SEER2 15.2" in body
     assert sha == hashlib.sha256(body.encode()).hexdigest()
     assert q(runtime_conn, "SELECT extraction_status FROM pages WHERE id = %s", (page_id,)) == (("waiting",),)
 

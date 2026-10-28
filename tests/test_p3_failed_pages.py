@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from fakeai import FakeAI, Truncated
-from p3support import answer, make_page, new_brand, q, responder_for, settle, spec_html
+from p3support import answer, make_page, new_brand, q, responder_for, settle, spec_pdf
 
 MODEL = "RA15AZ24AJ3CA"
 T0 = datetime(2031, 3, 1, 9, 0)
@@ -21,7 +21,7 @@ def status(conn, page_id):
 def failed_page(conn, bad):
     """A page read once by a fake AI that answered `bad`. Returns (brand name, page id, the fake)."""
     name, brand_id = new_brand(conn)
-    page_id = make_page(conn, brand_id, spec_html(MODEL))
+    page_id = make_page(conn, brand_id, spec_pdf(MODEL), is_pdf=True)
     fake = FakeAI(lambda r: bad)
     settle(conn, fake, name, now=T0)
     assert len(fake.requests) == 1  # it really was read and billed once
@@ -34,7 +34,7 @@ def test_a_cut_off_or_unreadable_answer_ends_failed_and_is_logged_as_rejected(ru
     assert status(runtime_conn, page_id) == "failed"
     rows = q(runtime_conn, "SELECT rejected, cost_usd FROM ai_calls WHERE page_id = %s", (page_id,))
     assert len(rows) == 1 and rows[0][0] == 1 and rows[0][1] > 0
-    assert q(runtime_conn, "SELECT COUNT(*) FROM found_models WHERE page_id = %s", (page_id,))[0][0] == 0
+    assert q(runtime_conn, "SELECT COUNT(*) FROM document_models dm JOIN document_urls du ON du.document_id = dm.document_id WHERE du.page_id = %s", (page_id,))[0][0] == 0
 
 
 @pytest.mark.parametrize("bad", [Truncated('{"models": [{"model_number": "RA15'), "Sorry, I cannot do that."])
@@ -50,7 +50,7 @@ def test_indexing_the_same_bytes_again_keeps_the_page_failed_and_makes_no_calls(
     from crawler.textextract import index_page
     name, page_id, fake = failed_page(runtime_conn, "Sorry, I cannot do that.")
     calls = list(fake.calls)
-    index_page(runtime_conn, page_id, spec_html(MODEL), is_pdf=False)  # same bytes, same cleaned text
+    index_page(runtime_conn, page_id, spec_pdf(MODEL), is_pdf=True)  # same bytes, same cleaned text
     assert status(runtime_conn, page_id) == "failed"
     settle(runtime_conn, fake, name, now=T0 + timedelta(days=31))
     assert fake.calls == calls
@@ -61,11 +61,11 @@ def test_indexing_the_same_bytes_again_keeps_the_page_failed_and_makes_no_calls(
 def test_changed_text_reopens_a_failed_page_and_it_is_read_once(runtime_conn):
     from crawler.textextract import index_page
     name, page_id, fake = failed_page(runtime_conn, "Sorry, I cannot do that.")
-    changed = spec_html(MODEL, seer2="16.0")
-    index_page(runtime_conn, page_id, changed, is_pdf=False)
+    changed = spec_pdf(MODEL, seer2="16.0")
+    index_page(runtime_conn, page_id, changed, is_pdf=True)
     assert status(runtime_conn, page_id) == "waiting"
 
-    good = FakeAI(responder_for({MODEL: answer(MODEL, seer2="16.0")}))
+    good = FakeAI(responder_for({MODEL: answer(MODEL)}))
     settle(runtime_conn, good, name, now=T0 + timedelta(days=2))
     assert len(good.requests) == 1
     assert status(runtime_conn, page_id) == "extracted"
@@ -87,7 +87,7 @@ def test_a_new_extractor_version_reopens_a_failed_page(runtime_conn, monkeypatch
 def test_a_lost_batch_is_not_billed_and_is_tried_again_after_a_day(runtime_conn):
     from crawler.extract import extract_pass
     name, brand_id = new_brand(runtime_conn)
-    page_id = make_page(runtime_conn, brand_id, spec_html(MODEL))
+    page_id = make_page(runtime_conn, brand_id, spec_pdf(MODEL), is_pdf=True)
     fake = FakeAI(responder_for({MODEL: answer(MODEL)}))
 
     extract_pass(runtime_conn, fake, brand=name, now=T0)       # submits

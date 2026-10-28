@@ -1,4 +1,4 @@
-"""Gap-fill: a targeted web search for ENERGY STAR models that still have no specs (D15).
+"""Gap-fill: a targeted web search for ENERGY STAR models that still have no document (D15).
 
 One search per model family, limited to the brand's approved hosts, after a free check of the text we
 already hold. At most 200 searches a month; a search that finds nothing is not repeated for 6 months.
@@ -11,9 +11,10 @@ from decimal import Decimal
 
 from crawler import ai
 from crawler.brands import UnknownTarget, find_brand
+from crawler.db import try_lock, unlock
 from crawler.discover import _clean_url
 from crawler.hosts import in_scope
-from crawler.store import HAS_NO_SPECS_SQL, alias_key
+from crawler.store import HAS_NO_DOCUMENT_SQL, alias_key
 
 import hashlib
 
@@ -56,7 +57,7 @@ def _exec(conn, sql, args=()):
 def _holds_text(conn, fam):
     """True when stored page text mentions the family, with or without stray spaces or hyphens in it."""
     pattern = r"[\s-]*".join(re.escape(c) for c in fam)
-    return bool(_rows(conn, "SELECT 1 FROM page_text WHERE body REGEXP %s LIMIT 1", (pattern,)))
+    return bool(_rows(conn, "SELECT 1 FROM page_text WHERE body ~ %s LIMIT 1", (pattern,)))
 
 
 def _month_bounds(now):
@@ -65,12 +66,12 @@ def _month_bounds(now):
 
 
 def gap_fill(conn, client, **kwargs):
-    if not _rows(conn, "SELECT GET_LOCK('crawler-gapfill', 0)")[0][0]:
+    if not try_lock(conn, "crawler-gapfill"):
         raise RuntimeError("Another gapfill is already running.")
     try:
         return _gap_fill(conn, client, **kwargs)
     finally:
-        _rows(conn, "SELECT RELEASE_LOCK('crawler-gapfill')")
+        unlock(conn, "crawler-gapfill")
 
 
 def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=MAX_SEARCHES_PER_MONTH, after_search=None):
@@ -98,10 +99,10 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             continue
         keys = [r[0] for r in _rows(
             conn,
-            "SELECT em.model_key FROM equipment_models em WHERE em.energy_star_confirmed = 1 AND em.manufacturer_id IN "
+            "SELECT em.model_key FROM models em WHERE em.energy_star_confirmed AND em.manufacturer_id IN "
             "(SELECT id FROM manufacturers WHERE name_key = %s UNION "
             " SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s) "
-            "AND " + HAS_NO_SPECS_SQL,
+            "AND " + HAS_NO_DOCUMENT_SQL,
             (alias_key(brand_name), alias_key(brand_name)))]
         for fam in sorted({family(k) for k in keys}):
             if used >= max_searches:
@@ -128,9 +129,9 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             _exec(conn,
                   "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "
                   "cache_write_tokens, searches, is_batch, rejected, cost_usd, created_at) "
-                  "VALUES ('gapfill', %s, NULL, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)",
+                  "VALUES ('gapfill', %s, NULL, %s, %s, %s, %s, %s, %s, false, %s, %s, %s)",
                   (brand_id, model, reply.input_tokens, reply.output_tokens, reply.cache_read_tokens,
-                   reply.cache_write_tokens, reply.searches, 0 if answer is not None else 1,
+                   reply.cache_write_tokens, reply.searches, answer is None,
                    ai.cost(model, reply.input_tokens, reply.output_tokens, searches=reply.searches), now))
             used += max(reply.searches, 1)
             summary["searched"] += 1
@@ -142,12 +143,12 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
                 if url is None or not in_scope(url, list(hosts)):
                     continue
                 _exec(conn, "INSERT INTO start_urls (brand_id, url, url_sha, found_by) VALUES (%s, %s, %s, 'discover') "
-                            "ON DUPLICATE KEY UPDATE id = id", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
+                            "ON CONFLICT (brand_id, url_sha) DO NOTHING", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
                 stored += 1
             summary["found"] += 1 if stored else 0
             _exec(conn, "INSERT INTO gapfill_searches (brand_id, family, searched_at, found) VALUES (%s, %s, %s, %s) "
-                        "ON DUPLICATE KEY UPDATE searched_at = VALUES(searched_at), found = VALUES(found)",
-                  (brand_id, fam, now, 1 if stored else 0))
+                        "ON CONFLICT (brand_id, family) DO UPDATE SET searched_at = EXCLUDED.searched_at, found = EXCLUDED.found",
+                  (brand_id, fam, now, bool(stored)))
             if after_search:
                 after_search()
     return summary

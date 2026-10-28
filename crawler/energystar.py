@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 
-from crawler.store import manufacturer_for, model_key
+from crawler.store import manufacturer_for, model_key, save_model
 
 DATASET_ID = "83eb-xbyy"
 ES_HOSTS = {"data.energystar.gov"}
@@ -42,7 +42,7 @@ def _rows(conn, sql, args=()):
 def _exec(conn, sql, args=()):
     with conn.cursor() as cur:
         cur.execute(sql, args)
-        return cur.lastrowid
+        return cur.fetchone()[0] if cur.description else None
 
 
 def _text(row, field):
@@ -65,21 +65,17 @@ def _integer(value):
         number = Decimal(value)
     except (InvalidOperation, ValueError):
         return None
-    return int(number) if number.is_finite() and 0 <= number < 4_000_000_000 else None
+    return int(number) if number.is_finite() and 0 <= number < 2_000_000_000 else None
 
 
 def _model(conn, manufacturer_id, number):
-    key = model_key(number)[:190]
-    if not key:
+    if not model_key(number):
         return None
-    return _exec(conn,
-                 "INSERT INTO equipment_models (manufacturer_id, model_number, model_key, energy_star_confirmed) "
-                 "VALUES (%s, %s, %s, 1) ON DUPLICATE KEY UPDATE energy_star_confirmed = 1, id = LAST_INSERT_ID(id)",
-                 (manufacturer_id, number[:190], key))
+    return save_model(conn, manufacturer_id, number, energy_star=True)
 
 
 def _apply_row(conn, row, row_id, counts):
-    """Write one changed dataset row into equipment_systems / members / models."""
+    """Write one changed dataset row into es_systems / members / models."""
     ahri = _text(row, "ahri_ref")[:60]
     outdoor_brand = _text(row, "brand")
     indoor_brand = _text(row, "indoor_brand") or outdoor_brand
@@ -91,33 +87,33 @@ def _apply_row(conn, row, row_id, counts):
     members = [(role, model_key(number)) for role, number, _ in models if model_key(number)]
     ratings_key = hashlib.sha256(json.dumps([[str(r) for r in ratings], members]).encode("utf-8")).hexdigest()
 
-    previous = _rows(conn, "SELECT system_id FROM energy_star_rows WHERE dataset_id = %s AND row_id = %s",
+    previous = _rows(conn, "SELECT system_id FROM es_rows WHERE dataset_id = %s AND row_id = %s",
                      (DATASET_ID, row_id))
     previous = previous[0][0] if previous else None
-    mine = _rows(conn, "SELECT id, superseded FROM equipment_systems WHERE ahri_ref = %s AND ratings_key = %s",
+    mine = _rows(conn, "SELECT id, superseded FROM es_systems WHERE ahri_ref = %s AND ratings_key = %s",
                  (ahri, ratings_key))
     if mine:
         system_id = mine[0][0]
         if mine[0][1]:
-            _exec(conn, "UPDATE equipment_systems SET superseded = 0 WHERE id = %s", (system_id,))
+            _exec(conn, "UPDATE es_systems SET superseded = false WHERE id = %s", (system_id,))
             counts["systems_changed"] += 1
     else:
         system_id = _exec(conn,
-                          "INSERT INTO equipment_systems (ahri_ref, ratings_key, seer2, eer2, hspf2, cooling_capacity_btuh, "
-                          "heating_capacity_btuh) VALUES (%s, %s, %s, %s, %s, %s, %s)", (ahri, ratings_key, *ratings))
+                          "INSERT INTO es_systems (ahri_ref, ratings_key, seer2, eer2, hspf2, cooling_capacity_btuh, "
+                          "heating_capacity_btuh) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id", (ahri, ratings_key, *ratings))
         for role, number, brand in models:
             if not model_key(number):
                 continue
             model_id = _model(conn, manufacturer_for(conn, brand), number)
-            _exec(conn, "INSERT INTO equipment_system_members (system_id, model_id, role) VALUES (%s, %s, %s) "
-                        "ON DUPLICATE KEY UPDATE id = id", (system_id, model_id, role))
+            _exec(conn, "INSERT INTO es_system_members (system_id, model_id, role) VALUES (%s, %s, %s) "
+                        "ON CONFLICT DO NOTHING", (system_id, model_id, role))
         counts["systems_changed" if previous else "systems_added"] += 1
     if previous and previous != system_id:
         # the row's old system is replaced, unless another row of the dataset still produces it
-        still_used = _rows(conn, "SELECT 1 FROM energy_star_rows WHERE system_id = %s AND NOT (dataset_id = %s AND row_id = %s) "
+        still_used = _rows(conn, "SELECT 1 FROM es_rows WHERE system_id = %s AND NOT (dataset_id = %s AND row_id = %s) "
                                  "LIMIT 1", (previous, DATASET_ID, row_id))
         if not still_used:
-            _exec(conn, "UPDATE equipment_systems SET superseded = 1 WHERE id = %s", (previous,))
+            _exec(conn, "UPDATE es_systems SET superseded = true WHERE id = %s", (previous,))
     return system_id
 
 
@@ -134,7 +130,7 @@ def _process_page(conn, rows, counts):
         row_id = (_text(row, "row_id") or f"{ahri}|{outdoor}|{_text(row, 'indoor_model')}")[:100]
         raw = json.dumps(row, sort_keys=True)
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        stored = _rows(conn, "SELECT row_hash FROM energy_star_rows WHERE dataset_id = %s AND row_id = %s",
+        stored = _rows(conn, "SELECT row_hash FROM es_rows WHERE dataset_id = %s AND row_id = %s",
                        (DATASET_ID, row_id))
         if stored and stored[0][0] == digest:
             counts["rows_unchanged"] += 1
@@ -143,10 +139,11 @@ def _process_page(conn, rows, counts):
         try:
             system_id = _apply_row(conn, row, row_id, counts)
             _exec(conn,
-                  "INSERT INTO energy_star_rows (dataset_id, row_id, ahri_ref, brand_name, model_number, model_key, row_json, "
-                  "row_hash, system_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE ahri_ref = VALUES(ahri_ref), "
-                  "brand_name = VALUES(brand_name), model_number = VALUES(model_number), model_key = VALUES(model_key), "
-                  "row_json = VALUES(row_json), row_hash = VALUES(row_hash), system_id = VALUES(system_id)",
+                  "INSERT INTO es_rows (dataset_id, row_id, ahri_ref, brand_name, model_number, model_key, row_json, "
+                  "row_hash, system_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (dataset_id, row_id) DO UPDATE "
+                  "SET ahri_ref = EXCLUDED.ahri_ref, brand_name = EXCLUDED.brand_name, model_number = EXCLUDED.model_number, "
+                  "model_key = EXCLUDED.model_key, row_json = EXCLUDED.row_json, row_hash = EXCLUDED.row_hash, "
+                  "system_id = EXCLUDED.system_id",
                   (DATASET_ID, row_id, ahri[:60], _text(row, "brand")[:190], outdoor[:190], model_key(outdoor)[:190], raw,
                    digest, system_id))
             _exec(conn, "RELEASE SAVEPOINT es_row")
@@ -176,7 +173,7 @@ def pull(conn, fetcher, *, base_url=BASE_URL, allowed_hosts=ES_HOSTS, page_size=
     except (ValueError, KeyError, TypeError):
         counts["status"] = "failed"
         return counts
-    state = _rows(conn, "SELECT rows_updated_at FROM energy_star_state WHERE dataset_id = %s", (DATASET_ID,))
+    state = _rows(conn, "SELECT rows_updated_at FROM es_state WHERE dataset_id = %s", (DATASET_ID,))
     if state and state[0][0] == updated:
         counts["status"] = "unchanged"
         return counts
@@ -202,7 +199,7 @@ def pull(conn, fetcher, *, base_url=BASE_URL, allowed_hosts=ES_HOSTS, page_size=
             break
         offset += page_size
 
-    _exec(conn, "INSERT INTO energy_star_state (dataset_id, rows_updated_at, pulled_at) VALUES (%s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE rows_updated_at = VALUES(rows_updated_at), pulled_at = VALUES(pulled_at)",
+    _exec(conn, "INSERT INTO es_state (dataset_id, rows_updated_at, pulled_at) VALUES (%s, %s, %s) "
+                "ON CONFLICT (dataset_id) DO UPDATE SET rows_updated_at = EXCLUDED.rows_updated_at, pulled_at = EXCLUDED.pulled_at",
           (DATASET_ID, updated, now))
     return counts

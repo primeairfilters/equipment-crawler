@@ -272,7 +272,7 @@ def test_stop_a_brand_stops_the_brand_and_its_start_urls_and_deletes_nothing(run
     approve_host(runtime_conn, "ruud.com", brand=name)
     stop(runtime_conn, name)
     assert one(runtime_conn, "SELECT status FROM brands WHERE id = %s", (brand_id,)) == (("stopped",),)
-    assert one(runtime_conn, "SELECT COUNT(*), SUM(status = 'stopped') FROM start_urls WHERE brand_id = %s",
+    assert one(runtime_conn, "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'stopped') FROM start_urls WHERE brand_id = %s",
                (brand_id,))[0] == (2, 2)
     assert one(runtime_conn, "SELECT COUNT(*) FROM brand_domains WHERE brand_id = %s", (brand_id,))[0][0] == 1
 
@@ -293,12 +293,13 @@ def test_status_reports_hosts_waiting_and_page_counts_per_brand(runtime_conn):
         for host, st in (("one.test", "waiting"), ("two.test", "waiting"), ("three.test", "approved")):
             cur.execute("INSERT INTO brand_domains (brand_id, host, status, found_by) VALUES (%s, %s, %s, 'ai')",
                         (brand_id, host, st))
-        cur.execute("INSERT INTO hosts (host) VALUES ('three.test')")
-        host_id = cur.lastrowid
+        cur.execute("INSERT INTO hosts (host) VALUES ('three.test') ON CONFLICT (host) DO UPDATE SET host = EXCLUDED.host "
+                    "RETURNING id")
+        host_id = cur.fetchone()[0]
         for n, (fetched, code) in enumerate((("2026-01-01 12:00:00", 200), (None, None), ("2026-01-01 12:00:00", 404))):
             cur.execute(
                 "INSERT INTO pages (brand_id, host_id, url, url_sha, fetched_at, http_status) "
-                "VALUES (%s, %s, %s, SHA2(%s, 256), %s, %s)",
+                "VALUES (%s, %s, %s, encode(sha256(convert_to(%s, 'UTF8')), 'hex'), %s, %s)",
                 (brand_id, host_id, f"http://three.test/{n}", f"http://three.test/{n}", fetched, code))
     mine = [row for row in status(runtime_conn) if row["brand"] == name]
     assert len(mine) == 1
