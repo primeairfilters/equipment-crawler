@@ -65,3 +65,8 @@ def test_no_test_file_hands_the_raw_environment_to_a_subprocess():
         if "subprocess" in text and ("dict(os.environ" in text or "env=os.environ" in text):
             offenders.append(path.name)
     assert offenders == []
+
+
+def test_the_openai_key_is_hidden_too():
+    # P13 added OPENAI_API_KEY_CRAWLER (docker compose loads it); a test building the real embedder would spend money
+    assert "OPENAI_API_KEY_CRAWLER" in AI_KEYS

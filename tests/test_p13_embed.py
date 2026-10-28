@@ -190,7 +190,7 @@ def test_the_embed_command_reports_what_it_did_and_says_when_there_is_no_key(run
 
 def test_prune_removes_the_vectors_of_builds_that_can_never_be_live_again(monkeypatch):
     import crawler.kb
-    from crawler.db import connect
+    from support import connect
     from crawler.embed import embed_pass
     from crawler.kb import build, prune, publish
     from test_p12_build import t, words
@@ -207,3 +207,27 @@ def test_prune_removes_the_vectors_of_builds_that_can_never_be_live_again(monkey
     finally:
         conn.rollback()
         conn.close()
+
+
+def test_a_text_in_a_script_that_costs_many_tokens_a_letter_is_cut_to_fit_the_models_limit():
+    # garbled Arabic (presentation forms and U+FFFD): 5,031 characters were over 8,192 tokens, and the API refused it
+    from crawler.embed import MAX_INPUT_TOKENS, _estimate, embed_text
+    text = embed_text("Ruud", "install_manual", "Manual", "Section", 1, 1, "ﻲ�ﺎ�ﺮهﻜﻟا�قوﺪﻨﺼﻟا " * 600)
+    assert _estimate(text) <= MAX_INPUT_TOKENS and text.startswith("Ruud · Install manual")
+    english = embed_text("Ruud", "install_manual", "Manual", "Section", 1, 1, "Check the charge. " * 400)
+    assert english.endswith("Check the charge. ")  # ordinary text of that length is not cut
+
+
+def test_when_the_api_refuses_a_request_its_reason_is_kept(monkeypatch):
+    import httpx
+    from crawler.embed import EmbedError, OpenAIEmbedder
+
+    class Refused:
+        status_code = 400
+
+        def json(self):
+            return {"error": {"message": "Invalid 'input[9]': maximum input length is 8192 tokens."}}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: Refused())
+    with pytest.raises(EmbedError, match=r"400: Invalid 'input\[9\]': maximum input length is 8192 tokens"):
+        OpenAIEmbedder(api_key="test-key").embed(["x"])

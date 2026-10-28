@@ -1,8 +1,9 @@
 -- P14 (D43, D44): the search Breeze runs, measured by ./crawl ask and ./crawl eval. Breeze's PHP tool copies this file.
 -- Three ways inside one narrowed set of live sections, merged by reciprocal rank (k = 60):
 --   meaning: cosine distance to the question's vector (text-embedding-3-small, 1536), closer than %(max_distance)s
---   words:   full text, any of the question's words, each weighed by its rarity (IDF) and double in the heading path
---            (tsv_weighted, migration 0004); a natural question rarely holds every word, and common words are noise
+--   words:   full text, any of the question's words, each weighed by its rarity (IDF), double in the heading path
+--            (tsv_weighted, migration 0004) and once more in the manual's title (title_tsv, migration 0005); a natural
+--            question rarely holds every word, and common words are noise
 --   codes:   section_terms, exact codes from the question (E4, LOPS, part and model numbers), most codes matched first
 -- Parameters: question text, question vector ('[..]'), codes (text[]), documents (bigint[] or NULL), manufacturer
 -- (integer or NULL), language (a section's own language, or NULL for any), depth (rows per way), top (rows
@@ -18,17 +19,23 @@ WITH meaning AS (
 ), meaning_ranked AS (
   SELECT section_id, distance, row_number() OVER (ORDER BY distance, section_id) AS r
   FROM meaning WHERE distance < %(max_distance)s
-), lexemes AS (
-  -- each word of the question, weighed by how rare it is among live sections (IDF): "thermistor" counts, "air" barely
+), lexemes AS MATERIALIZED (
+  -- each word of the question, weighed by how rare it is among live sections, counting its manual's title (IDF):
+  -- "thermistor" counts, "air" barely
   SELECT l.query, l.heading, ln((SELECT COUNT(*) FROM kb.sections WHERE is_live)::numeric
-                                / GREATEST((SELECT COUNT(*) FROM kb.sections s WHERE s.is_live AND s.tsv_weighted @@ l.query), 1)) AS idf
+                                / GREATEST((SELECT COUNT(*) FROM kb.sections s JOIN kb.documents d ON d.id = s.document_id
+                                            WHERE s.is_live AND (s.tsv_weighted @@ l.query OR d.title_tsv @@ l.query)), 1)) AS idf
   FROM (SELECT quote_literal(lexeme)::tsquery AS query, (quote_literal(lexeme) || ':A')::tsquery AS heading
         FROM unnest(tsvector_to_array(to_tsvector('english', %(question)s))) AS lexeme) l
 ), words AS (
+  -- a word counts double in the heading path, once in the body, and half again in the manual's title (the product;
+  -- full credit spread over every section of a manual and let a brochure titled "Mini-Split" beat the service manual)
   SELECT s.id AS section_id, row_number() OVER (ORDER BY x.score DESC, s.id) AS r
-  FROM kb.sections s
-  CROSS JOIN LATERAL (SELECT SUM(l.idf * CASE WHEN s.tsv_weighted @@ l.heading THEN 2 ELSE 1 END) AS score
-                      FROM lexemes l WHERE s.tsv_weighted @@ l.query) x
+  FROM kb.sections s JOIN kb.documents d ON d.id = s.document_id
+  CROSS JOIN LATERAL (SELECT SUM(l.idf * ((CASE WHEN s.tsv_weighted @@ l.heading THEN 2
+                                               WHEN s.tsv_weighted @@ l.query THEN 1 ELSE 0 END)
+                                         + (CASE WHEN d.title_tsv @@ l.query THEN 0.5 ELSE 0 END))) AS score
+                      FROM lexemes l) x
   WHERE s.is_live AND x.score > 0
     AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
     AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)

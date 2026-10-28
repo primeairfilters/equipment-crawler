@@ -304,3 +304,32 @@ def test_question_words_side_by_side_in_a_section_count_more_than_the_same_words
     best = min((h for h in hits if h.text_rank), key=lambda h: h.text_rank)
     assert best.heading_path == "Troubleshooting"
 
+
+
+# ---------------------------------------------------------------- tuning: the manual's title counts in word search
+
+def titled(conn, monkeypatch, title, pages, brand_name):
+    doc, _ = manual(conn, monkeypatch, pages, brand_name=brand_name)
+    q(conn, "UPDATE documents SET title = %s WHERE id = %s", (title, doc))
+    return doc
+
+
+def test_a_product_named_in_the_question_finds_its_manual_through_the_title(runtime_conn, monkeypatch):
+    # batch 2: water heater error-code tables beat the mini-split's for "Floating Air mini split error code 9"
+    from crawler.embed import embed_pass
+    from crawler.search import ask
+    split = titled(runtime_conn, monkeypatch, "Ductless Floating Air Mini Split Service Manual",
+                   [[t("Troubleshooting", 14), t(words(300, "fault") + " Error code 9 is maximum current protection.")]],
+                   "Titletest")
+    for n in range(3):
+        titled(runtime_conn, monkeypatch, f"Electric Water Heater Use and Care {n}",
+               [[t("Error Codes", 14), t(words(300, f"heat{n}x") + " Error code 9 means an element is open. Error codes.")]],
+               "Titletest")
+    for n in range(6):  # filler, so rarity weights look like a real library
+        titled(runtime_conn, monkeypatch, f"Gas Furnace Installation {n}",
+               [[t(f"Venting {n}", 14), t(words(300, f"vent{n}x"))]], "Titletest")
+    embed_pass(runtime_conn, BagEmbedder(), cap_usd=5)
+    hits = ask(runtime_conn, BagEmbedder(), "Floating Air mini split error code 9", manufacturer="Titletest",
+               cap_usd=5)["results"]
+    best = min((h for h in hits if h.text_rank), key=lambda h: h.text_rank)
+    assert best.document_id == split

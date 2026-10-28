@@ -2,13 +2,15 @@ import os
 
 import pytest
 
-from support import AI_KEYS, NotATestDatabase, assert_test_database, connect
+from support import AI_KEYS, NotATestDatabase, assert_test_database, connect, db_name
 
 
 def pytest_sessionstart(session):
-    """Hide the real AI key from every test, then abort unless the database is a test database, per the server."""
+    """Hide the real AI key from every test, point every connection (the crawler's own connect too) at the testing
+    database, then abort unless the database is a test database, per the server."""
     for key in AI_KEYS:
         os.environ.pop(key, None)
+    os.environ["EQ_DB_NAME"] = db_name()
     try:
         conn = connect("runtime")
     except Exception as exc:

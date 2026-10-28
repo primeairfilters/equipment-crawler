@@ -4,7 +4,7 @@ cannot delete. Each test works on its own migrate connection and rolls back.
 """
 import pytest
 
-from crawler.db import connect
+from support import connect
 from p3support import q
 from test_p12_build import PAGES, document, t, words
 

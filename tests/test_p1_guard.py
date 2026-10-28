@@ -106,3 +106,15 @@ def test_pytest_aborts_before_any_test_when_pointed_at_a_non_test_database():
     assert result.returncode != 0
     # The run was aborted at start, not "passed with nothing selected".
     assert "no tests ran" not in output and "passed" not in output, output
+
+
+def test_the_crawlers_own_connect_reaches_the_testing_database_during_tests():
+    # 2026-10-27: two prune tests used crawler.db.connect, which defaulted to the real database (always rolled back)
+    from crawler.db import connect as crawler_connect
+    from support import TESTING_DB
+    for kind in ("runtime", "migrate"):
+        conn = crawler_connect(kind)
+        try:
+            assert conn.execute("SELECT current_database()").fetchone()[0] == TESTING_DB
+        finally:
+            conn.close()

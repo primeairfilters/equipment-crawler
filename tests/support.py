@@ -12,7 +12,7 @@ TESTING_DB = "tracforce_equipment_testing"
 SEARCH_PATH = "crawl,kb,public"
 
 # The real AI key must never be visible to a test or to anything a test starts, so no test can spend money.
-AI_KEYS = ("ANTHROPIC_API_KEY_CRAWLER", "ANTHROPIC_API_KEY")
+AI_KEYS = ("ANTHROPIC_API_KEY_CRAWLER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY_CRAWLER")
 
 
 def clean_env(**extra):

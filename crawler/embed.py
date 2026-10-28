@@ -2,7 +2,8 @@
 
 - One table per embedding model and size: text-embedding-3-small at 1536 dimensions (Breeze's), as halfvec.
 - The text embedded is a one-line header and the section: "Ruud · Install manual · <title> · <path> · p.23", so
-  "Ruud subcooling" finds a section that never says "Ruud" (like Breeze's EmbedHelpDocs).
+  "Ruud subcooling" finds a section that never says "Ruud" (like Breeze's EmbedHelpDocs). It is cut to an estimated
+  MAX_INPUT_TOKENS: garbled Arabic (presentation forms, U+FFFD) ran over 8,192 tokens in 5,031 characters.
 - Never paid twice: a section whose exact text already has a vector (a rebuild that changed nothing) copies it.
 - Direct calls to the embeddings API (user, 2026-10-27), up to MAX_INPUTS_PER_REQUEST sections or
   MAX_TOKENS_PER_REQUEST tokens a request; each request is logged in ai_calls and counted in the same monthly cap as
@@ -23,7 +24,7 @@ DIMS = 1536
 TABLE = "section_vectors_te3s_1536"
 MAX_INPUTS_PER_REQUEST = 100
 MAX_TOKENS_PER_REQUEST = 60_000
-MAX_INPUT_CHARS = 20_000  # the model reads at most 8,191 tokens; a dense table runs about 2.5 characters a token
+MAX_INPUT_TOKENS = 8_000  # the model reads at most 8,192 tokens an input; the estimate below is on the high side
 DEFAULT_CAP_USD = "25"
 
 
@@ -52,7 +53,11 @@ class OpenAIEmbedder:
         except httpx.HTTPError as exc:
             raise EmbedError(f"the embeddings API could not be reached ({type(exc).__name__})") from exc
         if reply.status_code != 200:
-            raise EmbedError(f"the embeddings API answered {reply.status_code}")
+            try:
+                why = str(reply.json().get("error", {}).get("message", ""))[:300]
+            except Exception:
+                why = ""
+            raise EmbedError(f"the embeddings API answered {reply.status_code}" + (f": {why}" if why else ""))
         body = reply.json()
         data = sorted(body["data"], key=lambda d: d["index"])
         if len(data) != len(texts) or any(len(d["embedding"]) != self.dims for d in data):
@@ -70,14 +75,24 @@ def _label(doc_type):
     return (doc_type or "document").replace("_", " ").capitalize()
 
 
+def _char_tokens(char):
+    return 0.5 if ord(char) < 128 else 3  # Latin text runs about 4 characters a token; other scripts far fewer
+
+
 def embed_text(manufacturer, doc_type, title, path, page_from, page_to, body):
     pages = f"p.{page_from}" if page_from == page_to else f"p.{page_from}–{page_to}"
     header = " · ".join(part for part in (manufacturer, _label(doc_type), title, path, pages) if part)
-    return (header + "\n" + body)[:MAX_INPUT_CHARS]
+    text, used = header + "\n" + body, 1
+    for n, char in enumerate(text):
+        used += _char_tokens(char)
+        if used > MAX_INPUT_TOKENS:
+            return text[:n]
+    return text
 
 
 def _estimate(text):
-    return len(text) // 2 + 1  # on the high side: the cap is checked against this before a request is sent
+    """Tokens, on the high side: requests are sized and the cap is checked against this before a request is sent."""
+    return int(sum(_char_tokens(c) for c in text)) + 1
 
 
 def _vector_literal(vector):
