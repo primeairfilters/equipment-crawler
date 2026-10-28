@@ -323,3 +323,24 @@ def test_an_ocr_result_half_written_never_damages_the_kept_one(tmp_path, monkeyp
     monkeypatch.setattr(pathlib.Path, "write_text", dies_halfway)
     crawler.textextract.ocr_pages(two, [1])
     assert json.loads(kept.read_text()) == good
+
+
+def test_going_back_to_an_earlier_version_rebuilds_from_the_latest_build_not_any_build(runtime_conn, monkeypatch):
+    """Switching code back (a rollback, an A/B check) must not leave a document on the other version's live build just
+    because an older build already carries the current stamp (seen 2026-10-28: 153 documents)."""
+    import crawler.kb
+    from crawler.kb import build_and_publish
+    doc, _, _ = document(runtime_conn)
+    other = [[t("Refrigerant Charging", 14), t(words(330) + " Error E5 means HI PS tripped.")], PAGES[1]]
+    pages = {doc: PAGES}
+    monkeypatch.setattr(crawler.kb, "document_pages", lambda conn, d, **kw: pages.get(d, []))
+    build_and_publish(runtime_conn)  # build 1, version A
+    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-b")
+    pages[doc] = other
+    build_and_publish(runtime_conn)  # build 2, version B, live
+    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", __import__("crawler.sections").sections.SECTIONER_VERSION)
+    pages[doc] = PAGES
+    build_and_publish(runtime_conn)  # back to A: the live build must be A's sections again
+    live_versions = {r[0] for r in q(runtime_conn, "SELECT DISTINCT sectioner_version FROM sections WHERE document_id = %s "
+                                                   "AND is_live", (doc,))}
+    assert live_versions == {crawler.kb.build_version()}

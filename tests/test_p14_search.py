@@ -333,3 +333,13 @@ def test_a_product_named_in_the_question_finds_its_manual_through_the_title(runt
                cap_usd=5)["results"]
     best = min((h for h in hits if h.text_rank), key=lambda h: h.text_rank)
     assert best.document_id == split
+
+
+def test_the_meaning_search_asks_the_vector_index_for_every_candidate_it_needs(runtime_conn, library):
+    """pgvector's HNSW index returns at most hnsw.ef_search (40) rows before the language and maker filters, under
+    DEPTH (50): the meaning list was cut short and changed with the index's state (2026-10-28: on the 25 eval questions
+    the default and an exact search disagreed; ef_search 400 matched exact search, same speed)."""
+    from crawler.search import DEPTH, search
+    search(runtime_conn, "subcooling", BagEmbedder().embed(["subcooling"])[0][0], top=5)
+    ef = int(q(runtime_conn, "SHOW hnsw.ef_search")[0][0])
+    assert ef >= 8 * DEPTH and q(runtime_conn, "SHOW hnsw.iterative_scan")[0][0] == "strict_order"

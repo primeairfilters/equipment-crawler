@@ -131,11 +131,16 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
                     items.append({"kind": "text", "text": text, "size": float(item.get("size") or 0),
                                   "bold": bool(item.get("bold"))})
         pages.append(items)
-    read = ocr_pages(data, [n for n, items in enumerate(pages) if not items], memory, strict=True)  # a table is text
+    wanted = [n for n, items in enumerate(pages)  # a table is text; a captioned drawing keeps its caption
+              if not items or (all(i["kind"] == "text" for i in items)
+                               and caption_only("\n".join(i["text"] for i in items)))]
+    read = ocr_pages(data, wanted, memory, strict=True)
     for n, lines in read.items():
         lines = [dict(line, text=clean(line["text"]).strip("| ")) for line in lines]  # a ruling beside a line reads as "|"
-        pages[n] = [{"kind": "text", "text": line["text"], "size": float(line.get("size") or 0), "bold": False,
-                     "ocr": True, "confidence": line.get("confidence", 100)} for line in lines if line["text"]]
+        caption = {_squash(i["text"]) for i in pages[n]}
+        pages[n] = pages[n] + [{"kind": "text", "text": line["text"], "size": float(line.get("size") or 0),
+                                "bold": False, "ocr": True, "confidence": line.get("confidence", 100)}
+                               for line in lines if line["text"] and _squash(line["text"]) not in caption]
     return pages
 
 
@@ -195,9 +200,10 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
     raw = _run_child(data, [str(max_pages)], timeout, memory)
     blank = drawn_pages(raw.get("rows"))
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
-    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text], memory)
+    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text or caption_only(text)], memory)
     for n, lines in read.items():
-        pages[n] = clean("\n".join(line["text"] for line in lines))
+        caption = {_squash(line) for line in pages[n].splitlines()}
+        pages[n] = clean("\n".join([pages[n]] + [line["text"] for line in lines if _squash(line["text"]) not in caption]))
     return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read))
 
 
@@ -295,6 +301,24 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
 
 
 _WORD = re.compile(r"[A-Za-z]{2,}")
+
+
+_NOT_A_CAPTION = re.compile(r"(notes?|memo|page|espa[ñn]ol|fran[çc]ais|english|intentionally ?left ?(blank|empty))\b.*",
+                            re.I)
+
+
+def caption_only(text):
+    """A page whose text layer is only a caption over a drawing ("9. WIRING DIAGRAM", "3. UNIT DIMENSION"): under
+    three real words, one of them 4+ letters, and not a Notes or blank page, a page number or a language header, nor
+    Arabic (user, 2026-10-28: OCR those, not the others)."""
+    if not text or has_text(text) or re.search(r"[\u0600-\u06FF]", text):
+        return False
+    words = " ".join(re.findall(r"[^\W\d_]+", text))
+    return bool(re.search(r"[^\W\d_]{4,}", words)) and not _NOT_A_CAPTION.match(words)
+
+
+def _squash(text):
+    return re.sub(r"\W+", "", text).lower()
 
 
 def has_text(text):

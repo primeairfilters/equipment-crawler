@@ -215,11 +215,13 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
                  "SELECT d.id FROM documents d WHERE d.state IN ('tagged', 'built', 'live') AND d.doc_type IS NOT NULL "
                  + ("AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = d.id "
                     "AND p.brand_id = %s) " if brand_id else "")
-                 + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s) "
+                 + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s "
+                   "AND s.build = (SELECT MAX(l.build) FROM sections l WHERE l.document_id = d.id)) "  # the latest build
                  "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (build_version(),))
     summary = {"built": 0, "unchanged": 0, "kept": [], "live": 0, "held": 0, "empty": 0, "fallback": []}
     held = _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'built' AND EXISTS "
-                       "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s)"
+                       "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s "
+                       "AND s.build = (SELECT MAX(l.build) FROM sections l WHERE l.document_id = d.id))"
                  + (" AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = "
                     "d.id AND p.brand_id = %s)" if brand_id else "") + " ORDER BY d.id",
                  (build_version(),) + ((brand_id,) if brand_id else ()))
@@ -264,7 +266,8 @@ def _build_one(conn, document_id, original, summary):
         summary["built"] += 1
         ok, _ = publish(conn, document_id, number)
         summary["live" if ok else "held"] += 1
-    elif not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s AND sectioner_version = %s LIMIT 1",
+    elif not _rows(conn, "SELECT 1 FROM sections s WHERE s.document_id = %s AND s.sectioner_version = %s AND s.build = "
+                         "(SELECT MAX(l.build) FROM sections l WHERE l.document_id = s.document_id) LIMIT 1",
                    (document_id, build_version())):
         summary["empty"] += 1  # no sections now: an earlier build (if any) stays, and the next run tries again
     elif live:

@@ -262,13 +262,39 @@ def extract_pass(conn, client, *, brand=None, model=ai.HAIKU, cap_usd=None, now=
         brand_id = find_brand(conn, brand)
         if brand_id is None:
             raise UnknownTarget(f"No brand called {brand}.")
-    summary = {"collected": 0, "submitted": 0, "held": 0, "already_read": 0, "skipped": 0}
+    summary = {"collected": 0, "submitted": 0, "held": 0, "already_read": 0, "skipped": 0, "copied": 0}
     if not try_lock(conn, "crawler-extract"):
         raise RuntimeError("Another extract is already running.")
     try:
-        return _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document, summary)
+        _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document, summary)
+        summary["copied"] = copy_twin_tags(conn, brand_id)
+        return summary
     finally:
         unlock(conn, "crawler-extract")
+
+
+def copy_twin_tags(conn, brand_id=None):
+    """A document whose text was already read under another file (its pages are "already read") never gets its own
+    answer: it takes the tags, title and models of the tagged document with the same text (user, 2026-10-28). Same
+    form number and language: the form-number rule (D55) links one to the other. Free. Returns how many."""
+    twins = _rows(conn,
+                  "SELECT DISTINCT ON (d.id) d.id, d.content_sha, p.id, p.url, p.brand_id, t.id, t.title, t.doc_type, "
+                  "t.trade, t.equipment_type, t.language, t.form_number, t.tagged_by, t.tagger_version "
+                  "FROM documents d JOIN document_urls du ON du.document_id = d.id JOIN pages p ON p.id = du.page_id "
+                  "JOIN pages tp ON tp.ai_extracted_sha = p.ai_extracted_sha AND tp.id <> p.id "
+                  "JOIN document_urls tdu ON tdu.page_id = tp.id JOIN documents t ON t.id = tdu.document_id "
+                  "WHERE d.doc_type IS NULL AND t.doc_type IS NOT NULL AND t.id <> d.id AND p.extraction_status = 'extracted' "
+                  "AND (%s::bigint IS NULL OR p.brand_id = %s) ORDER BY d.id, t.id", (brand_id, brand_id))
+    for (doc_id, sha, page_id, url, page_brand, twin_id, title, doc_type, trade, equipment_type, language, form,
+         tagged_by, version) in twins:
+        models = [{"model_number": m} for (m,) in _rows(
+            conn, "SELECT m.model_number FROM document_models dm JOIN models m ON m.id = dm.model_id "
+                  "WHERE dm.document_id = %s ORDER BY m.id", (twin_id,))]
+        save_document(conn, brand_id=page_brand, page_id=page_id, source_url=url, title=title, content_sha=sha,
+                      models=models, extracted_by=tagged_by, doc_type=doc_type,
+                      tags={"trade": trade, "equipment_type": equipment_type, "language": language, "form_number": form},
+                      tagger_version=version)
+    return len(twins)
 
 
 def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document, summary):

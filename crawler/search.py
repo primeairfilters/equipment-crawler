@@ -26,6 +26,7 @@ from crawler.store import alias_key, model_key
 SEARCH_SQL = Path(__file__).with_name("search.sql").read_text()
 MIN_PREFIX = 5
 DEPTH = 50  # rows each way, before merging
+EF_SEARCH = 8 * DEPTH  # HNSW candidates; at 400 the meaning list matched an exact search on all 25 eval questions
 MAX_DISTANCE = 0.8  # a meaning match further than this is noise, not a match
 WIDEN_DISTANCE = 0.6  # to be tuned with ./crawl eval
 TOP = 8
@@ -98,6 +99,10 @@ def search(conn, question, vector, documents=None, manufacturer_id=None, top=TOP
     if model:
         own = model_key(model)
         codes = {c for c in codes if not (own.startswith(c) or c.startswith(own))}
+    # the HNSW index hands back at most hnsw.ef_search rows (default 40) before the filters, fewer than DEPTH: widen it
+    # and let it keep scanning past filtered rows, for this transaction only (same speed on the eval, 2026-10-28)
+    _rows(conn, "SELECT set_config('hnsw.ef_search', %s, true), set_config('hnsw.iterative_scan', 'strict_order', true)",
+          (str(EF_SEARCH),))
     rows = _rows(conn, SEARCH_SQL, {"question": question, "vector": _vector_literal(vector),
                                     "codes": sorted(codes), "documents": documents,
                                     "manufacturer": manufacturer_id, "language": language, "depth": DEPTH, "top": top,

@@ -233,3 +233,47 @@ def test_a_ruling_read_as_a_bar_is_trimmed_from_an_ocr_line(monkeypatch):
     monkeypatch.setattr(crawler.textextract, "ocr_pages",
                         lambda *a, **k: {0: [{"text": "| Wiring |", "size": 14, "confidence": 95}]})
     assert crawler.textextract.extract_layout(b"%PDF")[0][0]["text"] == "Wiring"
+
+
+# ---------------------------------------------------------------- pages that are a drawing with a caption (user, 2026-10-28)
+
+def caption_over_picture(caption, picture):
+    """A page whose text layer is only a caption, over a picture of text (a wiring diagram, a dimension drawing)."""
+    import ctypes
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    out = pdfium.PdfDocument.new()
+    page = out.new_page(612, 792)
+    page.insert_obj(pdfium.PdfDocument(picture).page_as_xobject(0, out).as_pageobject())
+    text = raw.FPDFPageObj_NewTextObj(out.raw, b"Helvetica", ctypes.c_float(18))
+    wide = (caption + "\0").encode("utf-16-le")
+    raw.FPDFText_SetText(text, ctypes.cast(ctypes.c_char_p(wide), ctypes.POINTER(raw.FPDF_WCHAR)))
+    raw.FPDFPageObj_Transform(text, 1, 0, 0, 1, 72, 750)
+    raw.FPDFPage_InsertObject(page.raw, text)
+    page.gen_content()
+    buf = io.BytesIO()
+    out.save(buf)
+    return buf.getvalue()
+
+
+def test_a_drawing_page_with_only_a_caption_is_read_with_ocr_and_keeps_its_caption():
+    from crawler.textextract import extract_layout, extract_pdf
+    pdf = caption_over_picture("9. WIRING DIAGRAM", picture_pdf(picture_page("", BODY)))
+    found = extract_pdf(pdf)
+    assert "WIRING DIAGRAM" in found.pages[0] and "subcooling" in found.pages[0] and found.ocr_pages == {0}
+    items = extract_layout(pdf)[0]
+    assert items[0]["text"] == "9. WIRING DIAGRAM" and not items[0].get("ocr")
+    assert any(i.get("ocr") and "subcooling" in i["text"] for i in items)
+
+
+@pytest.mark.parametrize("caption", ["Notes", "37", "Intentionally left blank", "ESPAÑOL", "FRANÇAIS 17", "Page 4"])
+def test_a_notes_blank_number_or_language_page_is_not_read_with_ocr(caption, monkeypatch):
+    import crawler.textextract
+
+    def no_ocr(*args, **kwargs):
+        raise AssertionError("OCR started on a page that is not a captioned drawing")
+
+    monkeypatch.setattr(crawler.textextract, "_ocr_child", no_ocr)
+    pdf = caption_over_picture(caption, picture_pdf(picture_page("", BODY)))
+    assert crawler.textextract.extract_pdf(pdf).ocr_pages == set()
+    crawler.textextract.extract_layout(pdf)

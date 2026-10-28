@@ -30,7 +30,7 @@ USER_AGENT = "TracforceEquipmentBot/1.0 (+mailto:support+crawler@tracforce.ai)"
 ROBOTS_TOKEN = "TracforceEquipmentBot"
 
 MAX_HTML_BYTES = 5 * 1024 * 1024
-MAX_PDF_BYTES = 50 * 1024 * 1024
+MAX_PDF_BYTES = 100 * 1024 * 1024  # Floating Air service manuals are 52-65 MB (user, 2026-10-28: 100 MB)
 MAX_ROBOTS_BYTES = 512 * 1024
 MAX_REDIRECTS = 5
 GAP_SECONDS = 10

@@ -338,3 +338,69 @@ def test_octet_stream_at_an_address_that_is_not_a_pdf_is_still_refused(ruud):
     ruud.site.route("/setup.exe", b"MZ\x90\x00", headers={"Content-Type": "application/octet-stream"})
     result = get(ruud, "/setup.exe")
     assert (result.outcome, result.reason) == ("failed", "bad_content_type") and not result.body
+
+
+def test_a_60_mb_pdf_is_fetched(ruud):
+    """Floating Air R-454B service manuals are 52-65 MB; the limit is 100 MB (user, 2026-10-28)."""
+    big = b"%PDF-1.7\n" + b"0" * (60 * 1024 * 1024)
+    ruud.site.route("/service-manual.pdf", big, headers={"Content-Type": "application/pdf"})
+    result = get(ruud, "/service-manual.pdf")
+    assert result.outcome == "fetched" and len(result.body) == len(big)
+
+
+# ---------------------------------------------------------------- an untagged twin takes the tags (user decision)
+
+def twin_documents(conn, form_line="Form No. A22-336 Rev. 4"):
+    """Two different PDF files with the same text: two documents. Tagging reads the text once."""
+    from crawler.documents import record_pdf
+    from p3support import make_page, make_pdf
+    name, brand_id = new_brand(conn)
+    lines = ["Ruud RA15AZ Installation Instructions", "Model RA15AZ24AJ3CA", form_line, "SEER2 15.2"]
+    docs = []
+    for n, drawings in enumerate((None, [["0 0 m 10 10 l S"]])):  # a drawn line: other bytes, same text
+        body = make_pdf([lines], drawings=drawings)
+        url = f"http://p3.test/twin{n}.pdf"
+        page_id = make_page(conn, brand_id, body, is_pdf=True, url=url)
+        docs.append(record_pdf(conn, brand_id, page_id, url, body))
+    return name, docs
+
+
+def tags_answer():
+    return {"doc_type": "install_manual", "models": ["RA15AZ24AJ3CA"], "trade": "hvac",
+            "equipment_type": "air_conditioner", "language": "en", "form_number": "A22-336",
+            "title": "RA15AZ Installation Instructions"}
+
+
+def test_a_document_with_the_same_text_as_a_tagged_one_takes_its_tags(runtime_conn):
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two) = twin_documents(runtime_conn)
+    assert one != two
+    fake = FakeAI(lambda r: tags_answer())
+    settle(runtime_conn, fake, name)
+    assert len(fake.requests) == 1  # the text was read once
+    rows = q(runtime_conn, "SELECT doc_type, trade, equipment_type, language, title, state FROM documents "
+                           "WHERE id IN (%s, %s) ORDER BY id", (one, two))
+    assert rows[0] == rows[1] and rows[0][0] == "install_manual" and rows[1][5] == "tagged"
+    assert q(runtime_conn, "SELECT COUNT(*) FROM document_models WHERE document_id = %s", (two,)) == ((1,),)
+
+
+def test_twins_with_the_same_form_number_keep_one_live(runtime_conn):
+    """The form-number rule (D55) links the second twin to the first, so search does not show the same text twice."""
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two) = twin_documents(runtime_conn)
+    settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
+    replaces = dict(q(runtime_conn, "SELECT id, replaces_id FROM documents WHERE id IN (%s, %s)", (one, two)))
+    assert sorted(v for v in replaces.values() if v) in ([one], [two])
+
+
+def test_short_top_level_sections_merged_together_keep_the_first_heading():
+    """Brochure pages: two short top-level topics merge (each under MIN_WORDS) and used to get an empty path."""
+    from crawler.sections import build_sections
+    cover = [text_line("Read every instruction in this manual before you install or service the unit. " * 40)]
+    short = "Floating Air mini-split systems deliver precise comfort and quiet operation. " * 8
+    page = [text_line("PRECISE PERFORMANCE", size=30.0), text_line(short),
+            text_line("EASY-TO-CLEAN DESIGN", size=30.0), text_line(short.replace("comfort", "service"))]
+    paths = [s.heading_path for s in build_sections([cover, page]) if s.page_from == 2]
+    assert paths == ["PRECISE PERFORMANCE"]

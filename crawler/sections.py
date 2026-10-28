@@ -22,7 +22,8 @@ Free and deterministic: the same lines always give the same sections.
   it (no heading between, under NOTE_WORDS) goes with it: "*Crankcase heater recommended", "[ ] Designates Metric";
   else a short block right before it opens it (a column of labels outside the ruling).
 - Text aims at MIN_WORDS..MAX_WORDS: a short section merges into the next, a long one splits at a sentence end. It
-  merges into its own subsections and into its next sibling (then under their parent's path, empty at the top level),
+  merges into its own subsections and into its next sibling (then under their parent's path; at the top level, the
+  first heading's),
   never across a higher heading: one topic, a true path.
 - With no headings at all, text falls back to overlapping windows.
 - A section (text or table) whose common words clearly say en, es or fr is flagged lang:xx (a manual's Spanish and French halves),
@@ -34,7 +35,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-SECTIONER_VERSION = "24"
+SECTIONER_VERSION = "25"
 MIN_WORDS = 300
 MAX_WORDS = 800
 WINDOW_WORDS = 500
@@ -472,7 +473,9 @@ def build_sections(pages):
             ours, theirs = _language(" ".join(t for t, _ in carry.lines)), _language(" ".join(t for t, _ in lines))
             if sum(_words(t) for t, _ in together) <= MAX_WORDS and not (ours and theirs and ours != theirs):
                 if carry.level is not None:  # text before the first heading takes the next heading
-                    here, depth = (carry.path if carry.lifted is None else carry.lifted), carry.level
+                    # siblings merge under their parent; at the top level there is none, so the first heading stays
+                    # (user, 2026-10-28: not an empty path)
+                    here, depth = (carry.path if not carry.lifted else carry.lifted), carry.level
                 lines = together
             else:
                 merged.append(carry.alone())
