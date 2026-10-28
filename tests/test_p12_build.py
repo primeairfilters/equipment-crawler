@@ -44,8 +44,7 @@ def live(conn, document_id):
 # ---------------------------------------------------------------- build
 
 def test_a_build_stores_sections_with_pages_paths_and_copied_filters_and_is_not_live(runtime_conn):
-    from crawler.kb import build
-    from crawler.sections import SECTIONER_VERSION
+    from crawler.kb import build, build_version
     doc, mid, _ = document(runtime_conn)
     assert build(runtime_conn, doc, pages=PAGES) == 1
     rows = q(runtime_conn, "SELECT section_no, page_from, page_to, heading_path, kind, manufacturer_id, trade, equipment_type, "
@@ -53,7 +52,7 @@ def test_a_build_stores_sections_with_pages_paths_and_copied_filters_and_is_not_
                            "FROM sections WHERE document_id = %s ORDER BY section_no", (doc,))
     assert [r[:5] for r in rows] == [(1, 1, 1, "Refrigerant Charging", "text"), (2, 2, 2, "Wiring", "text"),
                                      (3, 2, 2, "Wiring", "table")]
-    assert all(r[5:] == (mid, "hvac", "air_conditioner", "install_manual", "en", False, SECTIONER_VERSION, True, 64)
+    assert all(r[5:] == (mid, "hvac", "air_conditioner", "install_manual", "en", False, build_version(), True, 64)
                for r in rows)
     assert q(runtime_conn, "SELECT state, live_build FROM documents WHERE id = %s", (doc,)) == (("built", None),)
 

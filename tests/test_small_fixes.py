@@ -236,3 +236,49 @@ def test_a_dash_at_a_heading_lines_end_is_kept_when_the_joined_word_is_not_a_wor
             text_line(FILLER_TEXT)]
     paths = {s.heading_path for s in build_sections([cover, page])}
     assert "COMMISSIONING PROCEDURE- BMS CONFIGURATION" in paths
+
+
+@pytest.mark.parametrize("junk", ["*YES", "*S or V", "* Crankcase heater"])
+def test_a_footnote_line_is_no_heading(junk):
+    paths = text_headings("Refrigerant Charging", junk)
+    assert not any(junk in p for p in paths)
+
+
+def test_a_navigation_line_repeated_at_the_foot_of_pages_is_dropped():
+    from crawler.sections import build_sections
+    pages = []
+    for n in range(20):  # on 7 of 20 pages: under half, like one language half of the EcoNet guide
+        body = [text_line(f"Step {n}: open the settings menu and choose option {n} for the thermostat schedule. " * 25)]
+        pages.append([text_line("Schedules", size=13.0)] + body
+                     + [text_line("> Return to Table of Contents", size=12.0) if n < 7 else text_line("Notes page", 12.0),
+                        text_line(f"EcoNet® Smart Thermostat User Guide {n}", size=12.0)])
+    assert not any("Return to Table of Contents" in s.body for s in build_sections(pages))
+
+
+# ---------------------------------------------------------------- repeatable reading order (mental notes)
+
+def test_the_pdf_reader_numbers_text_boxes_in_order_instead_of_by_memory_address():
+    """pdfminer breaks ties between equally distant text boxes with id() (a memory address), so lines at one height
+    could come out in a different order between reads. The reader gives pdfminer's layout module a stable id."""
+    import importlib.util
+    from pathlib import Path
+    import pdfminer.layout
+    spec = importlib.util.spec_from_file_location("pdfchild_under_test",
+                                                  Path(__file__).parent.parent / "crawler" / "pdfchild.py")
+    child = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(child)
+    try:
+        child._stable_ids()
+        first, second = object(), object()
+        assert pdfminer.layout.id(first) < pdfminer.layout.id(second)
+        assert pdfminer.layout.id(first) == pdfminer.layout.id(first)
+    finally:
+        vars(pdfminer.layout).pop("id", None)
+
+
+def test_reading_the_same_pdf_twice_gives_the_same_layout():
+    from crawler.textextract import _run_child
+    from p3support import make_pdf
+    pdf = make_pdf([["Model RA15AZ  Cooling 24000  Heating 22000", "Voltage 208/230  MCA 15  MOP 25"]] * 3)
+    assert _run_child(pdf, ["200", "layout"], 60, 1024 ** 3)["layout"] == \
+        _run_child(pdf, ["200", "layout"], 60, 1024 ** 3)["layout"]

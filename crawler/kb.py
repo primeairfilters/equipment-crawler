@@ -15,7 +15,7 @@ Nothing here deletes a row. Callers commit.
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from crawler import library
+from crawler import library, textextract
 from crawler.brands import UnknownTarget
 from crawler.sections import SECTIONER_VERSION, build_sections, terms
 from crawler.store import alias_key
@@ -39,6 +39,12 @@ def _exec(conn, sql, args=()):
 
 
 # ---------------------------------------------------------------- build
+
+def build_version():
+    """What a build is stamped with: the sectioner's version and the PDF reader's key, so a change to either makes
+    `sections` take every document again (one whose sections come out the same only takes the new stamp)."""
+    return f"{SECTIONER_VERSION}/{textextract._layout_reader()[:8]}"
+
 
 def document_pages(conn, document_id, problems=None, original=None):
     """Layout items per page: from the original PDF (with font sizes) when the library has it, else from the stored
@@ -102,7 +108,7 @@ def build(conn, document_id, *, pages=None, problems=None, original=None):
     latest = _rows(conn, "SELECT COALESCE(MAX(build), 0) FROM sections WHERE document_id = %s", (document_id,))[0][0]
     if latest and _same_sections(conn, document_id, latest, sections):
         _exec(conn, "UPDATE sections SET sectioner_version = %s WHERE document_id = %s AND build = %s "
-                    "AND sectioner_version <> %s", (SECTIONER_VERSION, document_id, latest, SECTIONER_VERSION))
+                    "AND sectioner_version <> %s", (build_version(), document_id, latest, build_version()))
         return None
     if not sections:
         return None
@@ -117,7 +123,7 @@ def build(conn, document_id, *, pages=None, problems=None, original=None):
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (document_id, number, n, s.page_from, s.page_to, s.heading_path, s.kind, s.body, s.body_sha, s.token_count,
                  list(s.flags), *list(filters.values())[:4], _own_language(s) or filters["language"],
-                 SECTIONER_VERSION))[0][0]
+                 build_version()))[0][0]
             for term in sorted(terms(s.heading_path + "\n" + s.body)):
                 _exec(conn, "INSERT INTO section_terms (term, section_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                       (term, section_id))
@@ -204,13 +210,13 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
                  + ("AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = d.id "
                     "AND p.brand_id = %s) " if brand_id else "")
                  + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s) "
-                 "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (SECTIONER_VERSION,))
+                 "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (build_version(),))
     summary = {"built": 0, "unchanged": 0, "live": 0, "held": 0, "empty": 0, "fallback": []}
     held = _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'built' AND EXISTS "
                        "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s)"
                  + (" AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = "
                     "d.id AND p.brand_id = %s)" if brand_id else "") + " ORDER BY d.id",
-                 (SECTIONER_VERSION,) + ((brand_id,) if brand_id else ()))
+                 (build_version(),) + ((brand_id,) if brand_id else ()))
     for (document_id,) in held:
         ok, _ = publish(conn, document_id)
         summary["live" if ok else "held"] += 1

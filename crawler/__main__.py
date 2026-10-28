@@ -42,8 +42,8 @@ def build_parser():
     judge.add_argument("decision", choices=["crawl", "skip"])
     secs = sub.add_parser("sections", help="cut tagged documents into sections and put them live (free, no AI)")
     secs.add_argument("brand", nargs="?")
-    secs.add_argument("--workers", type=int, default=2,
-                      help="PDFs read at once (each may use up to 1 GB; the container has 2 GB)")
+    secs.add_argument("--workers", type=int, default=3,
+                      help="PDFs read at once (3: 2.4x one worker; the 6 biggest manuals at once peaked at 1.1 GB of 2 GB)")
     vec = sub.add_parser("embed", help="give live sections their vectors (paid: OpenAI, counted in the monthly cap)")
     vec.add_argument("brand", nargs="?")
     question = sub.add_parser("ask", help="print the sections Breeze would get for a question (embeds it: paid, tiny)")

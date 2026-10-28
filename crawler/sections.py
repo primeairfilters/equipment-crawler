@@ -34,7 +34,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-SECTIONER_VERSION = "23"
+SECTIONER_VERSION = "24"
 MIN_WORDS = 300
 MAX_WORDS = 800
 WINDOW_WORDS = 500
@@ -114,7 +114,7 @@ _OCR_LABEL_NUMBER = re.compile(r"[A-Za-z)]\s+\d{1,2}$")  # a diagram callout's n
 OCR_HEADING_CONFIDENCE = 85  # Tesseract's mean for the line; real OCR headings read 86-97, diagram garble 40-80
 OCR_HEADING_WORDS = 8
 _ICON = re.compile(r"^[!⚠▲△\s]+")
-_MIRRORED_OR_NAV = re.compile(r"^[\])}>]")
+_MIRRORED_OR_NAV = re.compile(r"^[\])}>*]")  # also a footnote marker: "*YES", "*S or V"
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _WORDLIKE = re.compile(r"(?=[A-Za-z]*[AEIOUYaeiouy])[A-Za-z]{2,}")  # a pronounceable run: "HVAC" yes, "WTT" no
 _SPEC_VALUE = re.compile(r":\s*(.*\d|yes\b|no\b)", re.I)  # "Nominal Sizes: 2 to 5 Ton", "EcoNet Enabled: Yes"
@@ -171,7 +171,8 @@ def _drop_furniture(pages):
     furniture = {k for k, n in seen.items() if n >= 2 and n * 2 >= len(pages)} if len(pages) >= 2 else set()
     # a numbered footer ("EcoNet® Smart Thermostat User Guide 10"): a bottom line on FURNITURE_PAGES pages whose number
     # changes page to page; a fixed bottom line may be the page's only label (a spec book's "18K (Up to 2 indoor units)")
-    footers = {k for k, numbers in feet.items() if len(numbers) >= FURNITURE_PAGES and len(set(numbers)) * 2 > len(numbers)}
+    footers = {k for k, numbers in feet.items() if len(numbers) >= FURNITURE_PAGES
+               and (len(set(numbers)) * 2 > len(numbers) or k.startswith(("> ", "< ")))}  # or a link: "> Return to…"
     numbers = _page_numbers(pages)
     out = [[i for n, i in enumerate(page)
             if not (n in _edges(page) and (_norm(i["text"]) in furniture or (p, n) in numbers))

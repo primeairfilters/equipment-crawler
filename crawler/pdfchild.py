@@ -291,11 +291,29 @@ def _clip_aware():
     pdfplumber.page.PDFPageInterpreter = ClipInterpreter
 
 
+def _stable_ids():
+    """pdfminer's layout analysis breaks ties between equally distant text boxes by id(), a memory address, so lines at
+    one height came out in a different order between reads (8 Ruud documents, 2026-10-28). Its module gets an id that
+    numbers objects in the order first seen, which repeats from read to read."""
+    import pdfminer.layout
+    numbers, keep = {}, []
+
+    def stable_id(obj):
+        key = id(obj)
+        if key not in numbers:
+            numbers[key] = len(numbers)
+            keep.append(obj)  # held, so a freed object's address is never reused for another
+        return numbers[key]
+
+    pdfminer.layout.id = stable_id
+
+
 def main():
     max_pages = int(sys.argv[1])
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
     import pdfplumber
     _clip_aware()
+    _stable_ids()
 
     data = sys.stdin.buffer.read()
     pages, layouts, rows = [], [], []

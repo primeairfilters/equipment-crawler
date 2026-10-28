@@ -24,7 +24,8 @@ def test_an_unchanged_document_keeps_its_live_build_under_a_new_sectioner_versio
     ids = [r[0] for r in sections_of(runtime_conn, doc)]
     monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")
     assert build(runtime_conn, doc, pages=PAGES) is None
-    assert sections_of(runtime_conn, doc) == tuple((i, 1, "test-next") for i in ids)  # same rows, so same vectors
+    assert sections_of(runtime_conn, doc) == tuple((i, 1, crawler.kb.build_version()) for i in ids)  # same rows, vectors
+    assert crawler.kb.build_version().startswith("test-next/")
     assert {b for b, _ in live(runtime_conn, doc)} == {1}
 
 
@@ -115,4 +116,21 @@ def test_an_original_that_fails_in_a_worker_falls_back_to_the_stored_text_and_is
 def test_the_sections_command_takes_a_worker_count():
     from crawler.__main__ import build_parser as parser
     assert parser().parse_args(["sections", "Ruud", "--workers", "3"]).workers == 3
-    assert parser().parse_args(["sections"]).workers == 2
+    assert parser().parse_args(["sections"]).workers == 3  # measured 2026-10-28: 2.4x one worker, 1.1 GB peak
+
+
+def test_a_new_pdf_reader_alone_makes_sections_look_at_every_document_again(runtime_conn, monkeypatch):
+    """A reader change (pdfchild.py, pdfplumber) re-reads PDFs through the layout cache; the build version carries the
+    reader's key, so `sections` takes every document again (an unchanged one only takes the new version)."""
+    import crawler.kb
+    import crawler.textextract
+    from crawler.kb import build_and_publish
+    doc, _, _ = document(runtime_conn)
+    monkeypatch.setattr(crawler.kb, "document_pages", lambda conn, d, **kw: PAGES)
+    build_and_publish(runtime_conn)
+    before = sections_of(runtime_conn, doc)
+    monkeypatch.setattr(crawler.textextract, "_layout_reader", lambda: "a newer reader")
+    summary = build_and_publish(runtime_conn)
+    after = sections_of(runtime_conn, doc)
+    assert summary["unchanged"] >= 1 and [r[0] for r in after] == [r[0] for r in before]
+    assert {r[2] for r in after} == {crawler.kb.build_version()} != {r[2] for r in before}
