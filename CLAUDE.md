@@ -18,3 +18,8 @@
 
 - One entry per issue. Read the file first so an issue is not logged twice.
 - When an item is fixed or resolved, remove its entry from the file in the same step.
+
+## Commit messages
+
+The user commits; Claude drafts the message. Keep it short: one full sentence that says what changed (no body or
+bullet list unless the user asks for one). Keep the Co-Authored-By line.
