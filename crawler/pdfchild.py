@@ -305,7 +305,14 @@ def _stable_ids():
             keep.append(obj)  # held, so a freed object's address is never reused for another
         return numbers[key]
 
+    def next_page():
+        """Let the page's objects go: the tie-break is within a page, and holding them undid page.close() (a 41 MB
+        manual peaked at 719 MB instead of 548 MB)."""
+        numbers.clear()
+        keep.clear()
+
     pdfminer.layout.id = stable_id
+    return next_page
 
 
 def main():
@@ -313,7 +320,7 @@ def main():
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
     import pdfplumber
     _clip_aware()
-    _stable_ids()
+    next_page = _stable_ids()
 
     data = sys.stdin.buffer.read()
     pages, layouts, rows = [], [], []
@@ -327,11 +334,22 @@ def main():
             if layout:
                 layouts.append(page_layout(page))
             page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
+            next_page()
     out = {"pages": pages, "rows": rows}
     if layout:
         out["layout"] = layouts
     sys.stdout.write(json.dumps(out))
 
 
+def _limit_memory():
+    """The memory limit the parent asks for (CHILD_MEMORY_BYTES), set before anything big is loaded."""
+    import os
+    import resource
+    limit = int(os.environ.get("CHILD_MEMORY_BYTES") or 0)
+    if limit:
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
 if __name__ == "__main__":
+    _limit_memory()
     main()

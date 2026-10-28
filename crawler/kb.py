@@ -12,8 +12,11 @@ D56).
 
 Nothing here deletes a row. Callers commit.
 """
+import hashlib
 import os
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from crawler import library, textextract
 from crawler.brands import UnknownTarget
@@ -41,9 +44,12 @@ def _exec(conn, sql, args=()):
 # ---------------------------------------------------------------- build
 
 def build_version():
-    """What a build is stamped with: the sectioner's version and the PDF reader's key, so a change to either makes
+    """What a build is stamped with: the sectioner's version and a key for everything that reads the PDF (the layout
+    reader with its library versions, the OCR reader, textextract.py's own code), so a change to any of them makes
     `sections` take every document again (one whose sections come out the same only takes the new stamp)."""
-    return f"{SECTIONER_VERSION}/{textextract._layout_reader()[:8]}"
+    readers = "|".join((textextract._layout_reader(), textextract._ocr_reader(),
+                        hashlib.sha256(Path(textextract.__file__).read_bytes()).hexdigest()))
+    return f"{SECTIONER_VERSION}/{hashlib.sha256(readers.encode()).hexdigest()[:8]}"
 
 
 def document_pages(conn, document_id, problems=None, original=None):
@@ -211,7 +217,7 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
                     "AND p.brand_id = %s) " if brand_id else "")
                  + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s) "
                  "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (build_version(),))
-    summary = {"built": 0, "unchanged": 0, "live": 0, "held": 0, "empty": 0, "fallback": []}
+    summary = {"built": 0, "unchanged": 0, "kept": [], "live": 0, "held": 0, "empty": 0, "fallback": []}
     held = _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'built' AND EXISTS "
                        "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s)"
                  + (" AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = "
@@ -224,24 +230,44 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
             after_document()
     files = {d: r for d, *r in _rows(conn, "SELECT id, content_sha, page_count FROM documents WHERE id = ANY(%s)",
                                        ([d for (d,) in docs],))}
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:  # each read is its own child process
-        originals = pool.map(lambda d: read_original(*files[d]), [d for (d,) in docs])
-        for (document_id,), original in zip(docs, originals):
-            _build_one(conn, document_id, original, summary)
-            if after_document:
-                after_document()
+    workers = max(1, workers)
+    pool = ThreadPoolExecutor(max_workers=workers)  # each read is its own child process
+    ahead = deque()
+    try:
+        for (document_id,) in docs:  # keep at most twice the workers read ahead: finished layouts wait in memory
+            ahead.append((document_id, pool.submit(read_original, *files[document_id])))
+            if len(ahead) < 2 * workers:
+                continue
+            _next_from(ahead, conn, summary, after_document)
+        while ahead:
+            _next_from(ahead, conn, summary, after_document)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)  # on an error or Ctrl-C: drop the reads not started
     return summary
 
 
+def _next_from(ahead, conn, summary, after_document):
+    document_id, future = ahead.popleft()
+    _build_one(conn, document_id, future.result(), summary)
+    if after_document:
+        after_document()
+
+
 def _build_one(conn, document_id, original, summary):
+    live = bool(_rows(conn, "SELECT 1 FROM documents WHERE id = %s AND state = 'live'", (document_id,)))
+    if live and isinstance(original, ExtractError):
+        # the stored text has no headings or tables: never put it over a good live build
+        summary["kept"].append((document_id, str(original)))
+        return
     number = build(conn, document_id, problems=summary["fallback"], original=original)
     if number is not None:
         summary["built"] += 1
         ok, _ = publish(conn, document_id, number)
         summary["live" if ok else "held"] += 1
-    elif not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s LIMIT 1", (document_id,)):
-        summary["empty"] += 1
-    elif _rows(conn, "SELECT 1 FROM documents WHERE id = %s AND state = 'live'", (document_id,)):
+    elif not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s AND sectioner_version = %s LIMIT 1",
+                   (document_id, build_version())):
+        summary["empty"] += 1  # no sections now: an earlier build (if any) stays, and the next run tries again
+    elif live:
         summary["unchanged"] += 1  # its live build stays as it is (even one switched back to by hand)
     else:
         ok, _ = publish(conn, document_id)

@@ -1,9 +1,9 @@
 """Text out of HTML and PDF, stored in page_text, with the free filter deciding what AI reads."""
+import contextlib
 import hashlib
 import json
 import os
 import re
-import resource
 import signal
 import subprocess
 import sys
@@ -131,7 +131,7 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
                     items.append({"kind": "text", "text": text, "size": float(item.get("size") or 0),
                                   "bold": bool(item.get("bold"))})
         pages.append(items)
-    read = ocr_pages(data, [n for n, items in enumerate(pages) if not items], memory)  # a table is text too
+    read = ocr_pages(data, [n for n, items in enumerate(pages) if not items], memory, strict=True)  # a table is text
     for n, lines in read.items():
         lines = [dict(line, text=clean(line["text"]).strip("| ")) for line in lines]  # a ruling beside a line reads as "|"
         pages[n] = [{"kind": "text", "text": line["text"], "size": float(line.get("size") or 0), "bold": False,
@@ -144,6 +144,12 @@ def _layout_reader():
     from importlib.metadata import version
     code = hashlib.sha256(Path(__file__).with_name("pdfchild.py").read_bytes()).hexdigest()[:16]
     return f"{code}/pdfplumber {version('pdfplumber')}/pypdfium2 {version('pypdfium2')}"
+
+
+def _ocr_reader():
+    """What kept OCR results depend on: OCR_VERSION and ocrchild.py's code. Any change reads scanned pages again."""
+    code = hashlib.sha256(Path(__file__).with_name("ocrchild.py").read_bytes()).hexdigest()[:16]
+    return f"{OCR_VERSION}/{code}"
 
 
 def _layout_path(data):
@@ -167,13 +173,20 @@ def _keep_layout(data, max_pages, raw):
     path = _layout_path(data)
     if path is None:
         return
+    _write_whole(path, {"reader": _layout_reader(), "max_pages": max_pages, "raw": raw})
+
+
+def _write_whole(path, value):
+    """A kept answer in the library, written to a side file and then renamed: a reader never sees half a file, and a
+    failed write leaves the earlier one as it was. A library that cannot be written is only slower."""
+    part = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.part")
     try:
         path.parent.mkdir(exist_ok=True)
-        part = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.part")  # whole, then renamed: never half a file
-        part.write_text(json.dumps({"reader": _layout_reader(), "max_pages": max_pages, "raw": raw}))
+        part.write_text(json.dumps(value))
         part.replace(path)
     except OSError:
-        pass
+        with contextlib.suppress(OSError):
+            part.unlink(missing_ok=True)
 
 
 def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
@@ -188,7 +201,7 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
     return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read))
 
 
-def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES):
+def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
     """{page index: [line, ...]} for the pages OCR could read in English (user, 2026-10-28: English only; a page that
     reads as Spanish or French is left out). Nothing when Tesseract is not installed or OCR fails. Results are kept in
     the library (DOCS_DIR/.ocr/<sha>.json), so `reread` and `sections` read a page once."""
@@ -202,7 +215,7 @@ def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES):
         path = Path(folder) / ".ocr" / f"{hashlib.sha256(data).hexdigest()}.json"
         try:
             saved = json.loads(path.read_text())
-            if saved.get("version") == OCR_VERSION:
+            if saved.get("version") == _ocr_reader():
                 cache = saved.get("pages", {})
         except (OSError, ValueError):
             pass
@@ -211,15 +224,13 @@ def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES):
         try:
             cache.update(_ocr_child(data, missing, memory))
         except ExtractError:
-            return {}
+            if strict:  # sections: a build without its scanned pages must not replace a good one (kb._build_one)
+                raise
+            return {}  # crawl and reread: the page stays without text and a later reread tries again
         for n in missing:
             cache.setdefault(str(n), [])
         if path is not None:
-            try:
-                path.parent.mkdir(exist_ok=True)
-                path.write_text(json.dumps({"version": OCR_VERSION, "pages": cache}))
-            except OSError:
-                pass
+            _write_whole(path, {"version": _ocr_reader(), "pages": cache})
     out = {}
     for n in indexes:
         lines = [line for line in cache.get(str(n), []) if clean(line.get("text", ""))]
@@ -254,16 +265,15 @@ def drawn_text(rows):
 
 
 def _run_child(data, args, timeout, memory, child="pdfchild.py"):
-    def limit():
-        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
-
+    """The child sets its own memory limit (CHILD_MEMORY_BYTES) first thing: preexec_fn is not safe once `sections`
+    starts readers from threads."""
     child = Path(__file__).with_name(child)
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",  # none of the container's secrets
-           "OMP_THREAD_LIMIT": "1"}  # Tesseract: one thread keeps its memory inside the child's limit
+           "OMP_THREAD_LIMIT": "1",  # Tesseract: one thread keeps its memory inside the child's limit
+           "CHILD_MEMORY_BYTES": str(memory)}
     try:
         proc = subprocess.Popen([sys.executable, "-I", str(child), *args], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limit,
-                                start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
     except OSError as exc:
         raise ExtractError(f"could not start the PDF reader: {exc}") from exc
     try:

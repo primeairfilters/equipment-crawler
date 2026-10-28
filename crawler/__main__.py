@@ -297,7 +297,11 @@ def main(argv):
                     conn.commit()
                 print(f"Built sections for {summary['built']} documents: {summary['live']} live, "
                       f"{summary['held']} held back (hidden, switched off or not equipment), {summary['empty']} with no text; "
-                      f"{summary['unchanged']} unchanged.")
+                      f"{summary['unchanged']} unchanged"
+                      + (f", {len(summary['kept'])} kept as they are" if summary["kept"] else "") + ".")
+                for document_id, why in summary["kept"]:
+                    print(f"Document {document_id}: the original could not be read ({why}); its live sections stay "
+                          "as they are and the next run tries again.")
                 for document_id, why in summary["fallback"]:
                     print(f"Document {document_id}: the original could not be read ({why}), so its sections come from "
                           "the stored text, without headings or tables.")

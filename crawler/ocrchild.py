@@ -58,5 +58,15 @@ def main():
     sys.stdout.write(json.dumps({"pages": pages}))
 
 
+def _limit_memory():
+    """The memory limit the parent asks for (CHILD_MEMORY_BYTES), set before anything big is loaded."""
+    import os
+    import resource
+    limit = int(os.environ.get("CHILD_MEMORY_BYTES") or 0)
+    if limit:
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
 if __name__ == "__main__":
+    _limit_memory()
     main()

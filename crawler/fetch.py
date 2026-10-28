@@ -24,6 +24,7 @@ from protego import Protego
 from crawler import library
 from crawler.hosts import in_scope, is_refused_host, normalize_host
 from crawler.netpolicy import is_public_ip
+from crawler.rules import is_pdf_link
 
 USER_AGENT = "TracforceEquipmentBot/1.0 (+mailto:support+crawler@tracforce.ai)"
 ROBOTS_TOKEN = "TracforceEquipmentBot"
@@ -106,6 +107,17 @@ def _body_limit(status, headers):
     if kind == "application/pdf":
         return MAX_PDF_BYTES
     return 0
+
+
+OCTET_TYPES = ("application/octet-stream", "binary/octet-stream")
+
+
+def _pdf_address_limit(status, headers):
+    """A .pdf address: some hosts serve PDFs as octet-stream (files.myrheem.com, 2026-10-28); the body must still start
+    with the PDF signature (fetch checks it)."""
+    if 200 <= status < 300 and _encoding_ok(headers) and kind_of(headers) in OCTET_TYPES:
+        return MAX_PDF_BYTES
+    return _body_limit(status, headers)
 
 
 def _robots_limit(status, headers):
@@ -477,7 +489,8 @@ class Fetcher:
                             conditional["If-None-Match"] = existing["etag"]
                         if existing["last_modified"]:
                             conditional["If-Modified-Since"] = existing["last_modified"]
-                    raw = self._get(host_id, target, conditional, LIMITS[kind])
+                    limit = _pdf_address_limit if kind == "page" and is_pdf_link(current) else LIMITS[kind]
+                    raw = self._get(host_id, target, conditional, limit)
             except _Refused as refused:
                 return Result("refused", refused.reason, url=current)
             except _ConnError:
@@ -504,7 +517,7 @@ class Fetcher:
             if raw.body is None:
                 return failed("bad_content_type", raw.status)
 
-            is_pdf = kind_of(raw.headers) == "application/pdf"
+            is_pdf = kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
 

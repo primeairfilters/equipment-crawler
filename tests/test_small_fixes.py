@@ -282,3 +282,59 @@ def test_reading_the_same_pdf_twice_gives_the_same_layout():
     pdf = make_pdf([["Model RA15AZ  Cooling 24000  Heating 22000", "Voltage 208/230  MCA 15  MOP 25"]] * 3)
     assert _run_child(pdf, ["200", "layout"], 60, 1024 ** 3)["layout"] == \
         _run_child(pdf, ["200", "layout"], 60, 1024 ** 3)["layout"]
+
+
+def test_the_stable_ids_are_let_go_after_each_page():
+    """Holding every numbered object until the reader exits kept a whole manual's layout in memory (a 41 MB manual
+    peaked at 719 MB instead of 548 MB); the numbering is only needed within a page."""
+    import importlib.util
+    import gc
+    import weakref
+    from pathlib import Path
+    import pdfminer.layout
+    spec = importlib.util.spec_from_file_location("pdfchild_under_test",
+                                                  Path(__file__).parent.parent / "crawler" / "pdfchild.py")
+    child = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(child)
+
+    class Box:
+        pass
+
+    try:
+        next_page = child._stable_ids()
+        box = Box()
+        pdfminer.layout.id(box)
+        gone = weakref.ref(box)
+        del box
+        next_page()
+        gc.collect()
+        assert gone() is None
+        assert pdfminer.layout.id(object()) == 0  # numbering starts again on each page
+    finally:
+        vars(pdfminer.layout).pop("id", None)
+
+
+# ---------------------------------------------------------------- PDFs served as octet-stream (Ruud batch 3)
+
+from test_p2_fetch import get, ruud  # noqa: E402,F401  (ruud is a fixture)
+
+PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+
+
+@pytest.mark.parametrize("kind", ["application/octet-stream", "binary/octet-stream"])
+def test_a_pdf_address_served_as_octet_stream_is_kept_as_a_pdf(ruud, kind):
+    """files.myrheem.com serves some manuals as application/octet-stream (6 Ruud PDFs failed on it, 2026-10-28)."""
+    ruud.site.route("/manual.pdf", PDF_BYTES, headers={"Content-Type": kind})
+    result = get(ruud, "/manual.pdf")
+    assert result.outcome == "fetched" and result.body == PDF_BYTES and result.is_pdf
+
+
+def test_an_octet_stream_pdf_address_without_the_pdf_signature_is_rejected(ruud):
+    ruud.site.route("/manual.pdf", b"PK\x03\x04 a zip", headers={"Content-Type": "application/octet-stream"})
+    assert (get(ruud, "/manual.pdf").reason) == "not_pdf"
+
+
+def test_octet_stream_at_an_address_that_is_not_a_pdf_is_still_refused(ruud):
+    ruud.site.route("/setup.exe", b"MZ\x90\x00", headers={"Content-Type": "application/octet-stream"})
+    result = get(ruud, "/setup.exe")
+    assert (result.outcome, result.reason) == ("failed", "bad_content_type") and not result.body
