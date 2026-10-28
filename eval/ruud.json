@@ -54,5 +54,5 @@
   {"question": "Who do I call for parts on a commercial high efficiency water heater and what info do they need?", "manufacturer": "Ruud",
    "expect": [{"document": "824e6f42c47e", "pages": [56, 56]}]},
   {"question": "Nitrogen pressure test steps before evacuating a ductless line set", "manufacturer": "Ruud",
-   "expect": [{"document": "7eda67f4faf8", "pages": [40, 40]}]}
+   "expect": [{"document": "7eda67f4faf8", "pages": [40, 40]}, {"document": "531a200d1056", "pages": [17, 17]}]}
 ]

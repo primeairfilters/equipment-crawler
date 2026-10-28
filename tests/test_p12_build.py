@@ -83,6 +83,8 @@ def test_a_better_sectioner_builds_next_to_the_old_build_and_the_switch_keeps_ev
     assert publish(runtime_conn, doc) == (True, None)
     ids_before = {r[0] for r in q(runtime_conn, "SELECT id FROM sections WHERE document_id = %s", (doc,))}
     monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")
+    real_terms = crawler.kb.terms
+    monkeypatch.setattr(crawler.kb, "terms", lambda text: real_terms(text) | {"NEWTERM"})  # its sections differ
     assert build(runtime_conn, doc, pages=PAGES) == 2
     assert {b for b, _ in live(runtime_conn, doc)} == {1}  # the new build waits for publish
     assert publish(runtime_conn, doc) == (True, None)

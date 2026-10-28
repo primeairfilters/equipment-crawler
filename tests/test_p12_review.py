@@ -35,7 +35,14 @@ def stored(world, path, body):
     return doc, status
 
 
-def test_a_pdf_whose_text_is_mostly_drawn_as_shapes_has_no_text_pages_and_needs_ocr(world):
+def no_ocr(monkeypatch):
+    """The drawn-text rule on its own, as without Tesseract (tests/test_p12_ocr.py covers what OCR then reads)."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+
+def test_a_pdf_whose_text_is_mostly_drawn_as_shapes_has_no_text_pages_and_needs_ocr(world, monkeypatch):
+    no_ocr(monkeypatch)
     start(world)
     serve(world, "/start", "/warranty.pdf")
     body = make_pdf([real_lines(10)], [drawn_rows(10)])
@@ -72,6 +79,7 @@ def test_a_background_texture_of_specks_is_not_drawn_text():
 
 def test_a_pdf_with_drawn_text_gives_no_sections(runtime_conn, tmp_path, monkeypatch):
     from crawler.kb import build
+    no_ocr(monkeypatch)
     pdf = make_pdf([real_lines(10)], [drawn_rows(10)])
     sha = hashlib.sha256(pdf).hexdigest()
     monkeypatch.setenv("DOCS_DIR", str(tmp_path))
@@ -81,8 +89,9 @@ def test_a_pdf_with_drawn_text_gives_no_sections(runtime_conn, tmp_path, monkeyp
     assert q(runtime_conn, "SELECT COUNT(*) FROM sections WHERE document_id = %s", (doc,)) == ((0,),)
 
 
-def test_preview_says_why_a_pdf_with_drawn_text_has_no_sections(runtime_conn, tmp_path):
+def test_preview_says_why_a_pdf_with_drawn_text_has_no_sections(runtime_conn, tmp_path, monkeypatch):
     from test_p11_cli import cli
+    no_ocr(monkeypatch)
     path = tmp_path / "warranty.pdf"
     path.write_bytes(make_pdf([real_lines(10)], [drawn_rows(10)]))
     code, out, _ = cli(runtime_conn, "preview", str(path))

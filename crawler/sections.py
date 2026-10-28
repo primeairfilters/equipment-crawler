@@ -33,7 +33,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-SECTIONER_VERSION = "17"
+SECTIONER_VERSION = "22"
 MIN_WORDS = 300
 MAX_WORDS = 800
 WINDOW_WORDS = 500
@@ -103,6 +103,13 @@ _CALLOUT = re.compile(r"^(?:(?:warning|caution|notice|note|notes|danger|importan
                       r"precauci[oó]n|aviso|mise en garde|hot|burn|chaude|br[uû]lure|caliente)[\s!:.]*)+$", re.I)  # a warning box's caption: text, not a topic
 _CALLOUT_TITLE = re.compile(r"^(?:warning|caution|notice|note|danger|important|attention|avertissement|advertencia|"
                             r"precauci[oó]n|aviso)\s*[:!\-–—]", re.I)  # "WARNING: Refrigeration System under High pressure"
+# OCR headings (user, 2026-10-28: "clean the headings"): a warning icon read as letters before its caption ("A DANGER",
+# "Z\\WARNING", "Ay A2L", "M& ~~ CAUTION"); A2L is the flammable-refrigerant icon's label
+_OCR_ICON = re.compile(r"^[^A-Za-z]*(?:[A-Za-z]{1,2}[^A-Za-z]+|A(?=(?:danger|warning|caution)))?[^A-Za-z]*", re.I)
+_OCR_DEBRIS = re.compile(r"[\[\]{}<>~=_@©|]|\.{3}")  # rulings, arrows and leaders read as characters
+_OCR_LABEL_NUMBER = re.compile(r"[A-Za-z)]\s+\d{1,2}$")  # a diagram callout's number ("SMART MOde 5")
+OCR_HEADING_CONFIDENCE = 85  # Tesseract's mean for the line; real OCR headings read 86-97, diagram garble 40-80
+OCR_HEADING_WORDS = 8
 _WORDLIKE = re.compile(r"(?=[A-Za-z]*[AEIOUYaeiouy])[A-Za-z]{2,}")  # a pronounceable run: "HVAC" yes, "WTT" no
 _SPEC_VALUE = re.compile(r":\s*(.*\d|yes\b|no\b)", re.I)  # "Nominal Sizes: 2 to 5 Ton", "EcoNet Enabled: Yes"
 _BULLET = re.compile(r"^(o|[•·▪■◦●○–—\-*])\s")
@@ -182,12 +189,37 @@ def _heading_size(item, body, continuation=False):
         return None
     if sum(c.isdigit() for c in text) > len(text) / 2:
         return None
+    if item.get("ocr") and not _ocr_heading(text, item.get("confidence", 100), continuation):
+        return None
     size = round(float(item.get("size") or 0), 1)
     if body and size >= body * HEADING_RATIO:
         return size
     if item.get("bold") and size >= body and text.upper() == text and _words(text) <= 8:
         return body  # a bold capitals line at body size: the lowest heading level
     return None
+
+
+def _ocr_heading(text, confidence, continuation=False):
+    """Whether an OCR line may be a heading: read with confidence, no warning caption behind an icon, no diagram debris,
+    label or callout number, mostly letters, short, not one word repeated, and not a sentence cut at the line's end ("…exposed
+    to an", "prod-")."""
+    if confidence < OCR_HEADING_CONFIDENCE or _OCR_DEBRIS.search(text) or _OCR_LABEL_NUMBER.search(text):
+        return False
+    for caption in (text.lstrip(" !/\\("), text[_OCR_ICON.match(text).end():]):  # "A2L WARNING" is no icon + "L"
+        if _CALLOUT.match(caption) or _CALLOUT_TITLE.match(caption) or re.match(r"a2l\b", caption, re.I):
+            return False
+    if not re.match(r"[A-Za-z0-9(]", text) or re.match(r"\d+(?:[.,]\d+)?\s?(?:mm|cm|m|in|ft)\b", text, re.I):
+        return False  # a label on a drawing: "/ Nut", "—Fiberglass Insulation", "50mm Approx"
+    if text.startswith("(") and not re.match(r"\(\d+\)", text):
+        return False  # "(field-supplied)", "(Not included": a note or the rest of a line, not a title
+    if sum(c.isalpha() for c in text) < 0.6 * len(text.replace(" ", "")) or _words(text) > OCR_HEADING_WORDS:
+        return False
+    words = re.findall(r"[A-Za-z]+", text)
+    if len(words) > 1 and len(set(w.lower() for w in words)) <= len(words) / 2:
+        return False  # a table's column names ("Number Tool Number Tool")
+    if text.endswith("-"):
+        return False  # a word hyphenated across lines: the line is the middle of a paragraph
+    return continuation or not words or words[-1].upper() not in _STOPWORDS
 
 
 def _join_wrapped(pages, body):
@@ -323,6 +355,7 @@ def _windows(lines):
 
 def build_sections(pages):
     """pages: one list per page of {"kind": "text", "text", "size", "bold"} or {"kind": "table", "rows"} in reading order."""
+    ocr = {n for n, page in enumerate(pages, start=1) if any(i.get("ocr") for i in page)}  # pages read with OCR
     pages = _drop_furniture(pages)
     body = _body_size(pages)
     pages = _drop_cover_title(_join_wrapped(pages, body), body)
@@ -368,7 +401,7 @@ def build_sections(pages):
         lines = [line for kind, *rest in raw if kind == "text" for line in rest[0]]
         out = [_text_section(w, "") for w in _windows(lines)]
         out += [s for kind, *rest in raw if kind == "table" for s in rest[0]]
-        return _flagged(sorted(out, key=lambda s: (s.page_from, s.kind == "table")))
+        return _flagged(sorted(out, key=lambda s: (s.page_from, s.kind == "table")), ocr)
 
     # merge a short text block into the next text block (its heading kept as a line), then split long ones. It merges
     # into its own subsections, and into the next sibling (same level) under their parent's path; never across a higher
@@ -414,7 +447,7 @@ def build_sections(pages):
             out += entry[1]
         else:
             out += [_text_section(piece, entry[2]) for piece in _split_long(entry[1])]
-    return _flagged(out)
+    return _flagged(out, ocr)
 
 
 @dataclass
@@ -455,8 +488,12 @@ def _notes_to_tables(raw):
     return out
 
 
-def _flagged(sections):
+def _flagged(sections, ocr=()):
+    """Language, instruction-like text, and `ocr` on a section holding any page read with OCR (OCR misreads digits:
+    Breeze should send a tech to the page for a value)."""
     for s in sections:
+        if any(s.page_from <= n <= s.page_to for n in ocr) and "ocr" not in s.flags:
+            s.flags.append("ocr")
         lang = _language(s.body)
         if lang and f"lang:{lang}" not in s.flags:
             s.flags.append(f"lang:{lang}")  # kb.build stores it in place of the document's language

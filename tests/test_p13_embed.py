@@ -77,7 +77,9 @@ def test_a_rebuilt_section_with_the_same_text_reuses_its_vector_without_a_call(r
     from crawler.kb import build, publish
     doc, _, _ = live_document(runtime_conn, monkeypatch)
     embed_pass(runtime_conn, FakeEmbedder(), cap_usd=5)
-    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")  # a new build of the same text
+    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")
+    real_terms = crawler.kb.terms
+    monkeypatch.setattr(crawler.kb, "terms", lambda text: real_terms(text) | {"NEWTERM"})  # a new build, same text
     number = build(runtime_conn, doc)
     assert number == 2 and publish(runtime_conn, doc, number)[0]
     client = FakeEmbedder()

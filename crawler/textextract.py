@@ -7,6 +7,7 @@ import resource
 import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,9 @@ PDF_MEMORY_BYTES = 1024 ** 3
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
 DRAWN_TEXT_SHARE = 0.2  # this share of a PDF's text lines drawn as shapes: its text layer is fragments, treat as a scan
 DRAWN_TEXT_MIN_LINES = 5
+OCR_VERSION = "3"  # results are kept in the library under this version; a new reader gets a new key (2: column order, 3: confidence)
+OCR_SECONDS_BASE = 30
+OCR_SECONDS_PER_PAGE = 20  # Tesseract at 300 dpi takes 2-5 s a page; the rest is headroom
 
 _LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                             "ﬅ": "st", "ﬆ": "st", " ": " "})
@@ -38,6 +42,7 @@ class Extracted:
     pages: list = field(default_factory=list)
     title: str = None
     drawn_text: bool = False  # text drawn as shapes: the pages with drawn lines are left empty (drawn_pages)
+    ocr_pages: set = field(default_factory=set)  # page indexes whose text came from OCR
 
 
 def clean(text):
@@ -100,8 +105,12 @@ def _children(node):
 
 
 def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
-    """Per page, the text lines with font size and boldness, and the ruled tables, in reading order (for sections)."""
-    raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
+    """Per page, the text lines with font size and boldness, and the ruled tables, in reading order (for sections).
+    The reader's answer is kept in the library (_kept_layout), so a sectioner change does not read every PDF again."""
+    raw = _kept_layout(data, max_pages)
+    if raw is None:
+        raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
+        _keep_layout(data, max_pages, raw)
     try:
         layout = raw["layout"]
     except KeyError as exc:
@@ -122,15 +131,106 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
                     items.append({"kind": "text", "text": text, "size": float(item.get("size") or 0),
                                   "bold": bool(item.get("bold"))})
         pages.append(items)
+    read = ocr_pages(data, [n for n, items in enumerate(pages) if not items], memory)  # a table is text too
+    for n, lines in read.items():
+        lines = [dict(line, text=clean(line["text"]).strip("| ")) for line in lines]  # a ruling beside a line reads as "|"
+        pages[n] = [{"kind": "text", "text": line["text"], "size": float(line.get("size") or 0), "bold": False,
+                     "ocr": True, "confidence": line.get("confidence", 100)} for line in lines if line["text"]]
     return pages
 
 
+def _layout_reader():
+    """What the kept layout depends on: the reader's code and the PDF libraries it uses. Any change reads PDFs again."""
+    from importlib.metadata import version
+    code = hashlib.sha256(Path(__file__).with_name("pdfchild.py").read_bytes()).hexdigest()[:16]
+    return f"{code}/pdfplumber {version('pdfplumber')}/pypdfium2 {version('pypdfium2')}"
+
+
+def _layout_path(data):
+    folder = os.environ.get("DOCS_DIR")
+    return Path(folder) / ".layout" / f"{hashlib.sha256(data).hexdigest()}.json" if folder else None
+
+
+def _kept_layout(data, max_pages):
+    """The kept answer for this PDF, or None (none kept, another reader or page limit, or the file is damaged)."""
+    path = _layout_path(data)
+    try:
+        saved = json.loads(path.read_text()) if path else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(saved, dict) or saved.get("reader") != _layout_reader() or saved.get("max_pages") != max_pages:
+        return None
+    return saved.get("raw")
+
+
+def _keep_layout(data, max_pages, raw):
+    path = _layout_path(data)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(exist_ok=True)
+        part = path.with_suffix(f".{os.getpid()}-{threading.get_ident()}.part")  # whole, then renamed: never half a file
+        part.write_text(json.dumps({"reader": _layout_reader(), "max_pages": max_pages, "raw": raw}))
+        part.replace(path)
+    except OSError:
+        pass
+
+
 def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
-    """Parsed in a child process with a time and memory limit; over-long documents are cut."""
+    """Parsed in a child process with a time and memory limit; over-long documents are cut. Pages with no text layer
+    (empty, or text drawn as shapes) are read with OCR when Tesseract is there (ocr_pages)."""
     raw = _run_child(data, [str(max_pages)], timeout, memory)
     blank = drawn_pages(raw.get("rows"))
-    return Extracted(pages=["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])], title=None,
-                     drawn_text=bool(blank))
+    pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
+    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text], memory)
+    for n, lines in read.items():
+        pages[n] = clean("\n".join(line["text"] for line in lines))
+    return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read))
+
+
+def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES):
+    """{page index: [line, ...]} for the pages OCR could read in English (user, 2026-10-28: English only; a page that
+    reads as Spanish or French is left out). Nothing when Tesseract is not installed or OCR fails. Results are kept in
+    the library (DOCS_DIR/.ocr/<sha>.json), so `reread` and `sections` read a page once."""
+    import shutil
+    from crawler.sections import _language
+    if not indexes or shutil.which("tesseract") is None:
+        return {}
+    cache, path = {}, None
+    folder = os.environ.get("DOCS_DIR")
+    if folder:
+        path = Path(folder) / ".ocr" / f"{hashlib.sha256(data).hexdigest()}.json"
+        try:
+            saved = json.loads(path.read_text())
+            if saved.get("version") == OCR_VERSION:
+                cache = saved.get("pages", {})
+        except (OSError, ValueError):
+            pass
+    missing = [n for n in indexes if str(n) not in cache]
+    if missing:
+        try:
+            cache.update(_ocr_child(data, missing, memory))
+        except ExtractError:
+            return {}
+        for n in missing:
+            cache.setdefault(str(n), [])
+        if path is not None:
+            try:
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(json.dumps({"version": OCR_VERSION, "pages": cache}))
+            except OSError:
+                pass
+    out = {}
+    for n in indexes:
+        lines = [line for line in cache.get(str(n), []) if clean(line.get("text", ""))]
+        if lines and _language(" ".join(line["text"] for line in lines)) not in ("es", "fr"):
+            out[n] = lines
+    return out
+
+
+def _ocr_child(data, indexes, memory):
+    timeout = OCR_SECONDS_BASE + OCR_SECONDS_PER_PAGE * len(indexes)
+    return _run_child(data, [",".join(str(n) for n in indexes)], timeout, memory, child="ocrchild.py")["pages"]
 
 
 def drawn_pages(rows):
@@ -153,12 +253,13 @@ def drawn_text(rows):
     return drawn >= DRAWN_TEXT_MIN_LINES and drawn >= DRAWN_TEXT_SHARE * (drawn + real)
 
 
-def _run_child(data, args, timeout, memory):
+def _run_child(data, args, timeout, memory, child="pdfchild.py"):
     def limit():
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
 
-    child = Path(__file__).with_name("pdfchild.py")
-    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}  # none of the container's secrets
+    child = Path(__file__).with_name(child)
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",  # none of the container's secrets
+           "OMP_THREAD_LIMIT": "1"}  # Tesseract: one thread keeps its memory inside the child's limit
     try:
         proc = subprocess.Popen([sys.executable, "-I", str(child), *args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, preexec_fn=limit,

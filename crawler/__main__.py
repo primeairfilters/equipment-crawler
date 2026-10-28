@@ -42,6 +42,8 @@ def build_parser():
     judge.add_argument("decision", choices=["crawl", "skip"])
     secs = sub.add_parser("sections", help="cut tagged documents into sections and put them live (free, no AI)")
     secs.add_argument("brand", nargs="?")
+    secs.add_argument("--workers", type=int, default=2,
+                      help="PDFs read at once (each may use up to 1 GB; the container has 2 GB)")
     vec = sub.add_parser("embed", help="give live sections their vectors (paid: OpenAI, counted in the monthly cap)")
     vec.add_argument("brand", nargs="?")
     question = sub.add_parser("ask", help="print the sections Breeze would get for a question (embeds it: paid, tiny)")
@@ -285,11 +287,13 @@ def main(argv):
                 if args.brand and brand_id is None:
                     raise brands.UnknownTarget(f"No brand called {args.brand}.")
                 try:
-                    summary = build_and_publish(conn, brand_id=brand_id, after_document=conn.commit)
+                    summary = build_and_publish(conn, brand_id=brand_id, after_document=conn.commit,
+                                                workers=args.workers)
                 finally:
                     conn.commit()
                 print(f"Built sections for {summary['built']} documents: {summary['live']} live, "
-                      f"{summary['held']} held back (hidden, switched off or not equipment), {summary['empty']} with no text.")
+                      f"{summary['held']} held back (hidden, switched off or not equipment), {summary['empty']} with no text; "
+                      f"{summary['unchanged']} unchanged.")
                 for document_id, why in summary["fallback"]:
                     print(f"Document {document_id}: the original could not be read ({why}), so its sections come from "
                           "the stored text, without headings or tables.")

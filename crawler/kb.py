@@ -13,6 +13,7 @@ D56).
 Nothing here deletes a row. Callers commit.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from crawler import library
 from crawler.brands import UnknownTarget
@@ -39,21 +40,19 @@ def _exec(conn, sql, args=()):
 
 # ---------------------------------------------------------------- build
 
-def document_pages(conn, document_id, problems=None):
+def document_pages(conn, document_id, problems=None, original=None):
     """Layout items per page: from the original PDF (with font sizes) when the library has it, else from the stored
     page text, one line per text line and no sizes (which makes the sectioner fall back to windows). When the original
     could not be read, (document id, why) goes into problems: a fallback loses headings and tables, so it must show.
-    The time limit grows with the page count (a 69-page capacity chart takes about 140 s)."""
-    sha, page_count = _rows(conn, "SELECT content_sha, page_count FROM documents WHERE id = %s", (document_id,))[0]
-    folder = os.environ.get("DOCS_DIR")
-    if library.configured() and library.has_file(sha):
-        with open(os.path.join(folder, f"{sha}.pdf"), "rb") as handle:
-            try:
-                return extract_layout(handle.read(),
-                                      timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)))
-            except ExtractError as exc:
-                if problems is not None:
-                    problems.append((document_id, str(exc)))
+    original: read_original's answer when the caller read it already (build_and_publish reads ahead)."""
+    if original is None:
+        sha, page_count = _rows(conn, "SELECT content_sha, page_count FROM documents WHERE id = %s", (document_id,))[0]
+        original = read_original(sha, page_count)
+    if isinstance(original, ExtractError):
+        if problems is not None:
+            problems.append((document_id, str(original)))
+    elif original is not NO_ORIGINAL:
+        return original
     page = _rows(conn, "SELECT du.page_id FROM document_urls du WHERE du.document_id = %s ORDER BY du.last_seen_at DESC "
                        "LIMIT 1", (document_id,))
     if not page:
@@ -63,31 +62,48 @@ def document_pages(conn, document_id, problems=None):
             for (body,) in texts]
 
 
+NO_ORIGINAL = object()  # read_original: the library does not have the PDF
+
+
+def read_original(sha, page_count):
+    """The PDF's layout from the library, the ExtractError when it could not be read, or NO_ORIGINAL. Needs no database,
+    so several can run at once. The time limit grows with the page count (a 69-page capacity chart takes about 140 s)."""
+    if not (library.configured() and library.has_file(sha)):
+        return NO_ORIGINAL
+    with open(os.path.join(os.environ["DOCS_DIR"], f"{sha}.pdf"), "rb") as handle:
+        data = handle.read()
+    try:
+        return extract_layout(data, timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)))
+    except ExtractError as exc:
+        return exc
+
+
 def _own_language(section):
     return next((f[5:] for f in section.flags if f.startswith("lang:")), None)
 
 
-def build(conn, document_id, *, pages=None, problems=None):
+def build(conn, document_id, *, pages=None, problems=None, original=None):
     """Make a new build of this document's sections. Returns its number, or None when the latest build already holds
-    exactly these sections from this sectioner version."""
+    exactly these sections (text, pages, path, kind, flags and search terms): under a newer sectioner version that build
+    only takes the new version, keeping its rows, so it stays live and keeps its vectors. original: the PDF already
+    read (see document_pages)."""
     doc = _rows(conn, "SELECT manufacturer_id, trade, equipment_type, doc_type, language, state FROM documents "
                       "WHERE id = %s", (document_id,))
     if not doc:
         raise UnknownTarget(f"No document {document_id}.")
     filters = dict(zip(FILTERS, doc[0][:5]))
-    sections = build_sections(document_pages(conn, document_id, problems=problems) if pages is None else pages)
+    sections = build_sections(document_pages(conn, document_id, problems=problems, original=original)
+                              if pages is None else pages)
     own = "(SELECT substr(f, 6) FROM unnest(flags) f WHERE f LIKE 'lang:%%' LIMIT 1)"  # a section's own language wins
     _exec(conn, f"UPDATE sections SET manufacturer_id = %s, trade = %s, equipment_type = %s, doc_type = %s, "
                 f"language = COALESCE({own}, %s) WHERE document_id = %s AND (manufacturer_id, trade, equipment_type, "
                 f"doc_type, language) IS DISTINCT FROM (%s, %s, %s, %s, COALESCE({own}, %s))",
           (*filters.values(), document_id, *filters.values()))  # tags changed since a build: keep the copies true
     latest = _rows(conn, "SELECT COALESCE(MAX(build), 0) FROM sections WHERE document_id = %s", (document_id,))[0][0]
-    if latest:
-        before = _rows(conn, "SELECT body_sha, page_from, page_to, heading_path, kind, sectioner_version FROM sections "
-                             "WHERE document_id = %s AND build = %s ORDER BY section_no", (document_id, latest))
-        now = tuple((s.body_sha, s.page_from, s.page_to, s.heading_path, s.kind, SECTIONER_VERSION) for s in sections)
-        if tuple(tuple(r) for r in before) == now:
-            return None
+    if latest and _same_sections(conn, document_id, latest, sections):
+        _exec(conn, "UPDATE sections SET sectioner_version = %s WHERE document_id = %s AND build = %s "
+                    "AND sectioner_version <> %s", (SECTIONER_VERSION, document_id, latest, SECTIONER_VERSION))
+        return None
     if not sections:
         return None
     number = latest + 1
@@ -112,6 +128,16 @@ def build(conn, document_id, *, pages=None, problems=None):
         raise
     _exec(conn, "RELEASE SAVEPOINT build_sections")
     return number
+
+
+def _same_sections(conn, document_id, build_number, sections):
+    before = _rows(conn, "SELECT s.body_sha, s.page_from, s.page_to, s.heading_path, s.kind, s.flags, "
+                         "ARRAY(SELECT st.term FROM section_terms st WHERE st.section_id = s.id ORDER BY st.term) "
+                         "FROM sections s WHERE s.document_id = %s AND s.build = %s ORDER BY s.section_no",
+                   (document_id, build_number))
+    now = [(s.body_sha, s.page_from, s.page_to, s.heading_path, s.kind, list(s.flags),
+            sorted(terms(s.heading_path + "\n" + s.body))) for s in sections]
+    return [(r[0], r[1], r[2], r[3], r[4], list(r[5]), sorted(r[6])) for r in before] == now
 
 
 # ---------------------------------------------------------------- publish
@@ -168,16 +194,18 @@ def publish(conn, document_id, build=None):
     return True, None
 
 
-def build_and_publish(conn, *, brand_id=None, after_document=None):
+def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
     """Every tagged document whose sections are missing or from an older sectioner: build, then publish. A build that
-    was held back earlier (hidden, switched off) is tried again, so it goes live once the reason is gone."""
+    was held back earlier (hidden, switched off) is tried again, so it goes live once the reason is gone. A document
+    whose sections come out the same only takes the new version ("unchanged"). workers: originals read at once; the
+    database work stays in document order on this connection."""
     docs = _rows(conn,
                  "SELECT d.id FROM documents d WHERE d.state IN ('tagged', 'built', 'live') AND d.doc_type IS NOT NULL "
                  + ("AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = d.id "
                     "AND p.brand_id = %s) " if brand_id else "")
                  + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s) "
                  "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (SECTIONER_VERSION,))
-    summary = {"built": 0, "live": 0, "held": 0, "empty": 0, "fallback": []}
+    summary = {"built": 0, "unchanged": 0, "live": 0, "held": 0, "empty": 0, "fallback": []}
     held = _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'built' AND EXISTS "
                        "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s)"
                  + (" AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = "
@@ -188,17 +216,30 @@ def build_and_publish(conn, *, brand_id=None, after_document=None):
         summary["live" if ok else "held"] += 1
         if after_document:
             after_document()
-    for (document_id,) in docs:
-        number = build(conn, document_id, problems=summary["fallback"])
-        if number is None:
-            summary["empty"] += 1
-        else:
-            summary["built"] += 1
-            ok, _ = publish(conn, document_id, number)
-            summary["live" if ok else "held"] += 1
-        if after_document:
-            after_document()
+    files = {d: r for d, *r in _rows(conn, "SELECT id, content_sha, page_count FROM documents WHERE id = ANY(%s)",
+                                       ([d for (d,) in docs],))}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:  # each read is its own child process
+        originals = pool.map(lambda d: read_original(*files[d]), [d for (d,) in docs])
+        for (document_id,), original in zip(docs, originals):
+            _build_one(conn, document_id, original, summary)
+            if after_document:
+                after_document()
     return summary
+
+
+def _build_one(conn, document_id, original, summary):
+    number = build(conn, document_id, problems=summary["fallback"], original=original)
+    if number is not None:
+        summary["built"] += 1
+        ok, _ = publish(conn, document_id, number)
+        summary["live" if ok else "held"] += 1
+    elif not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s LIMIT 1", (document_id,)):
+        summary["empty"] += 1
+    elif _rows(conn, "SELECT 1 FROM documents WHERE id = %s AND state = 'live'", (document_id,)):
+        summary["unchanged"] += 1  # its live build stays as it is (even one switched back to by hand)
+    else:
+        ok, _ = publish(conn, document_id)
+        summary["unchanged" if ok else "held"] += 1
 
 
 # ---------------------------------------------------------------- hide / unhide
