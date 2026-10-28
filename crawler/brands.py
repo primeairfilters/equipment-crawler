@@ -168,6 +168,23 @@ def stop(conn, target):
     raise UnknownTarget(f"No brand or host called {target}.")
 
 
+def resume(conn, target):
+    """Undo stop: a brand and its stopped start addresses go back to active; a stopped host is approved again (as ok)."""
+    brand_id = find_brand(conn, target)
+    if brand_id is not None:
+        _exec(conn, "UPDATE brands SET status = 'active' WHERE id = %s", (brand_id,))
+        _exec(conn, "UPDATE start_urls SET status = 'active' WHERE brand_id = %s AND status = 'stopped'", (brand_id,))
+        return "brand"
+    try:
+        host = normalize_host(target)
+    except ValueError:
+        host = None
+    if host is not None and _rows(conn, "SELECT 1 FROM brand_domains WHERE host = %s", (host,)):
+        _exec(conn, "UPDATE brand_domains SET status = 'approved' WHERE host = %s AND status = 'stopped'", (host,))
+        return "host"
+    raise UnknownTarget(f"No brand or host called {target}.")
+
+
 def status(conn):
     rows = _rows(
         conn,
@@ -187,11 +204,11 @@ def status(conn):
     result = [dict(zip(keys, (r[0], r[1], *(int(v) for v in r[2:])))) for r in rows]
     for row in result:
         key = alias_key(row["brand"])
-        row["documents"] = int(_rows(
+        row["documents"], row["untagged"] = (int(n) for n in _rows(
             conn,
-            "SELECT COUNT(DISTINCT d.id) FROM pages p JOIN document_urls du ON du.page_id = p.id "
-            "JOIN documents d ON d.id = du.document_id JOIN brands b ON b.id = p.brand_id "
-            "WHERE b.name = %s AND d.doc_type IS NOT NULL", (row["brand"],))[0][0])
+            "SELECT COUNT(DISTINCT d.id), COUNT(DISTINCT d.id) FILTER (WHERE d.doc_type IS NULL) FROM pages p "
+            "JOIN document_urls du ON du.page_id = p.id JOIN documents d ON d.id = du.document_id "
+            "JOIN brands b ON b.id = p.brand_id WHERE b.name = %s", (row["brand"],))[0])
         brand_id = find_brand(conn, row["brand"])
         row["starts_at_limit"] = int(_rows(
             conn, "SELECT COUNT(*) FROM (SELECT DISTINCT ON (start_url_id) limit_hit FROM crawl_runs WHERE brand_id = %s "
@@ -207,9 +224,10 @@ def status(conn):
         row["unreadable"] = int(_rows(
             conn, "SELECT COUNT(DISTINCT d.id) FROM documents d JOIN document_urls du ON du.document_id = d.id "
                   "JOIN pages p ON p.id = du.page_id WHERE p.brand_id = %s AND d.page_count = 0", (brand_id,))[0][0])
-        row["needs_ocr"] = int(_rows(
-            conn, "SELECT COUNT(DISTINCT d.id) FROM documents d JOIN document_urls du ON du.document_id = d.id "
-                  "JOIN pages p ON p.id = du.page_id WHERE p.brand_id = %s AND d.needs_ocr", (brand_id,))[0][0])
+        row["needs_ocr"], row["pages_without_text"] = (int(n) for n in _rows(
+            conn, "SELECT COUNT(*), COALESCE(SUM(page_count - text_pages), 0) FROM documents d WHERE d.needs_ocr AND "
+                  "EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = d.id "
+                  "AND p.brand_id = %s)", (brand_id,))[0])
         row["suggested_keywords"] = [r[0] for r in _rows(
             conn, "SELECT s.keyword FROM keyword_suggestions s WHERE s.brand_id = %s AND NOT EXISTS (SELECT 1 FROM "
                   "crawl_keywords k WHERE k.keyword = s.keyword AND (k.brand_id IS NULL OR k.brand_id = s.brand_id)) "

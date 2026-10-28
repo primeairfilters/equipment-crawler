@@ -103,10 +103,18 @@ def run(conn, fetcher, *, brand=None, max_pages=2000, after_page=None, link_chec
         starts = _rows(conn, "SELECT id, url, depth, kind FROM start_urls WHERE brand_id = %s AND status = 'active' "
                              "ORDER BY id", (brand_id,))
         for start_id, url, depth, kind in starts:
+            if not _active(conn, brand_id, start_id):
+                break  # stopped during the run
             # each start walks its own tree; a page another start already read this run is not due, so costs no request
             _StartCrawl(conn, fetcher, brand_id, start_id, url, depth, kind, keywords, set(), link_checker, max_pages,
                         after_page, summary).go()
     return summary
+
+
+def _active(conn, brand_id, start_id):
+    """False once `./crawl stop` has stopped the brand or this start address (a run checks before each page)."""
+    return bool(_rows(conn, "SELECT 1 FROM brands b JOIN start_urls s ON s.brand_id = b.id WHERE b.id = %s AND s.id = %s "
+                            "AND b.status = 'active' AND s.status = 'active'", (brand_id, start_id)))
 
 
 class _StartCrawl:
@@ -140,10 +148,31 @@ class _StartCrawl:
                 limit_hit = True
                 left = self._over_limit([url] + [item[3] for item in self.heap])
                 break
+            if not _active(self.conn, self.brand_id, self.start_id):
+                break
+            if self._newly_approved():
+                self.push(url, depth, parent_id, kind, priority)  # judged again after the PDFs that came into scope
+                continue
             self.seen.add(_seen_key(url))
             fetched += self._visit(url, depth, parent_id, kind)
         _rows(self.conn, "UPDATE crawl_runs SET finished_at = %s, pages_fetched = %s, limit_hit = %s, links_left = %s "
                          "WHERE id = %s AND started_at = %s", (self.fetcher.now(), fetched, limit_hit, left, run_id, started))
+
+    def _newly_approved(self):
+        """A host approved since the run started reaches it: its PDF links recorded as out of scope are queued (within
+        the depth limit). True when any were queued."""
+        approved = self.fetcher._approved(self.brand_id)
+        if set(approved) <= set(self.approved):
+            return False
+        self.approved, queued = approved, False
+        for row_id, url, depth, parent_id in _rows(
+                self.conn, "SELECT id, url, depth, parent_id FROM pages WHERE brand_id = %s AND fetch_state = 'out_of_scope' "
+                           "ORDER BY id", (self.brand_id,)):
+            if in_scope(url, approved) and (depth or 0) <= self.max_depth and _seen_key(url) not in self.seen:
+                _rows(self.conn, "UPDATE pages SET fetch_state = 'queued' WHERE id = %s", (row_id,))
+                self.push(url, depth or 0, parent_id, "page", PDF_FIRST)
+                queued = True
+        return queued
 
     def _over_limit(self, urls):
         left = set()

@@ -65,6 +65,8 @@ def build_parser():
     sub.add_parser("check", help="a read-only health report of what Breeze can see")
     stop = sub.add_parser("stop", help="stop a brand or a host")
     stop.add_argument("target")
+    resume = sub.add_parser("resume", help="undo stop for a brand or a host")
+    resume.add_argument("target")
     sub.add_parser("status", help="show where each brand is at")
     run = sub.add_parser("run", help="fetch pages")
     run.add_argument("--brand")
@@ -131,7 +133,7 @@ def _positive(text):
 
 
 def _plural(n, word):
-    return f"{n} {word}" + ("" if n == 1 else "s")
+    return f"{n} {word}" + ("" if n == 1 else "es" if word.endswith("s") else "s")
 
 
 def _missed_lines(row):
@@ -146,7 +148,9 @@ def _missed_lines(row):
     if row.get("unreadable"):
         lines.append(f"{_plural(row['unreadable'], 'document')} could not be read (./crawl reread tries again)")
     if row.get("needs_ocr"):
-        lines.append(f"{_plural(row['needs_ocr'], 'manual')} needing OCR")
+        lines.append(f"{_plural(row['needs_ocr'], 'manual')} with {_plural(row['pages_without_text'], 'page')} no text "
+                     "was read from (OCR reads empty English pages; others are Arabic, blank, Spanish/French or "
+                     "diagrams)")
     for reason, n in (row.get("keyword_skips") or {}).items():
         lines.append(f"{reason}: {n}")
     if row.get("suggested_keywords"):
@@ -361,6 +365,9 @@ def main(argv):
             elif args.command == "stop":
                 brands.stop(conn, args.target)
                 print(f"Stopped {args.target}.")
+            elif args.command == "resume":
+                brands.resume(conn, args.target)
+                print(f"Resumed {args.target}.")
             elif args.command == "status":
                 for row in brands.status(conn):
                     print(f"{row['brand']} ({row['state']}): {row['hosts_waiting']} hosts waiting, "
@@ -368,6 +375,7 @@ def main(argv):
                           f"{row['pages_failed']} failed, {row['models_found']} models found"
                           + (f", {row['pages_submitting']} stuck while sending to AI" if row["pages_submitting"] else "")
                           + f", {row['documents']} documents"
+                          + (f" ({row['untagged']} not tagged yet)" if row["untagged"] else "")
                           + (f", {row['es_models_without_documents']} ENERGY STAR models with no documents"
                              if row["es_models_without_documents"] else ""))
                     for line in _missed_lines(row):

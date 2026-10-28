@@ -2,7 +2,8 @@
 
 Free and deterministic: the same lines always give the same sections.
 - Running headers and footers are dropped first: a line among the first or last two of a page that repeats there
-  on at least two pages and half of all pages (digits and web addresses ignored when comparing). So is a page number
+  on at least two pages and half of all pages, or a bottom line with a changing number on FURNITURE_PAGES pages (one
+  language half's footer), digits and web addresses ignored when comparing. So is a page number
   there: a bare number ("7", "Page 7", "7 of 16") that is the page's own number, or is off from it by the same amount
   on 2+ pages (numbering that starts after a cover). A page left holding only "Notes" or "intentionally left blank"
   gives nothing.
@@ -33,7 +34,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-SECTIONER_VERSION = "22"
+SECTIONER_VERSION = "23"
 MIN_WORDS = 300
 MAX_WORDS = 800
 WINDOW_WORDS = 500
@@ -45,6 +46,8 @@ MAX_HEADING_CHARS = 90
 # a contents page's title is often bigger than the chapter titles; it heads the contents page only, never a chapter
 _CONTENTS = re.compile(r"(table of )?contents|table des mati[eè]res|sommaire|[íi]ndice|(tabla de )?contenidos?",
                        re.IGNORECASE)
+FURNITURE_PAGES = 6  # a numbered page-bottom line on this many pages is a footer even under half the pages (a manual's
+# English and French halves each have their own footer); page-top lines keep the half rule (a reprinted chapter title)
 MAX_HEADING_LINES = 3  # a heading wraps over at most this many lines; a longer run of short lines is labels or a list
 
 _STOPWORDS_BY_LANGUAGE = {
@@ -110,6 +113,9 @@ _OCR_DEBRIS = re.compile(r"[\[\]{}<>~=_@©|]|\.{3}")  # rulings, arrows and lead
 _OCR_LABEL_NUMBER = re.compile(r"[A-Za-z)]\s+\d{1,2}$")  # a diagram callout's number ("SMART MOde 5")
 OCR_HEADING_CONFIDENCE = 85  # Tesseract's mean for the line; real OCR headings read 86-97, diagram garble 40-80
 OCR_HEADING_WORDS = 8
+_ICON = re.compile(r"^[!⚠▲△\s]+")
+_MIRRORED_OR_NAV = re.compile(r"^[\])}>]")
+_ARABIC = re.compile(r"[\u0600-\u06FF]")
 _WORDLIKE = re.compile(r"(?=[A-Za-z]*[AEIOUYaeiouy])[A-Za-z]{2,}")  # a pronounceable run: "HVAC" yes, "WTT" no
 _SPEC_VALUE = re.compile(r":\s*(.*\d|yes\b|no\b)", re.I)  # "Nominal Sizes: 2 to 5 Ton", "EcoNet Enabled: Yes"
 _BULLET = re.compile(r"^(o|[•·▪■◦●○–—\-*])\s")
@@ -150,14 +156,26 @@ def _blank(page):
     return bool(texts) and len(texts) == len(page) and all(_BLANK_PAGE.match(" ".join(i["text"].split())) for i in texts)
 
 
+def _footer_lines(page):
+    texts = [n for n, i in enumerate(page) if i["kind"] == "text"]
+    return set(texts[-EDGE_LINES:])
+
+
 def _drop_furniture(pages):
-    seen = Counter()
+    seen, feet = Counter(), {}
     for page in pages:
         seen.update({_norm(page[n]["text"]) for n in _edges(page) if _norm(page[n]["text"])})
+        for n in _footer_lines(page):
+            if _norm(page[n]["text"]):
+                feet.setdefault(_norm(page[n]["text"]), []).append(" ".join(re.findall(r"\d+", page[n]["text"])))
     furniture = {k for k, n in seen.items() if n >= 2 and n * 2 >= len(pages)} if len(pages) >= 2 else set()
+    # a numbered footer ("EcoNet® Smart Thermostat User Guide 10"): a bottom line on FURNITURE_PAGES pages whose number
+    # changes page to page; a fixed bottom line may be the page's only label (a spec book's "18K (Up to 2 indoor units)")
+    footers = {k for k, numbers in feet.items() if len(numbers) >= FURNITURE_PAGES and len(set(numbers)) * 2 > len(numbers)}
     numbers = _page_numbers(pages)
     out = [[i for n, i in enumerate(page)
-            if not (n in _edges(page) and (_norm(i["text"]) in furniture or (p, n) in numbers))]
+            if not (n in _edges(page) and (_norm(i["text"]) in furniture or (p, n) in numbers))
+            and not (n in _footer_lines(page) and _norm(i["text"]) in footers)]
            for p, page in enumerate(pages)]
     return [[] if _blank(page) else page for page in out]
 
@@ -177,9 +195,14 @@ def _heading_size(item, body, continuation=False):
     text = " ".join(item["text"].split())
     if not text or len(text) > MAX_HEADING_CHARS or _words(text) > MAX_HEADING_WORDS:
         return None
-    if (item.get("body") or _BULLET.match(text) or _SPEC_VALUE.search(text) or _CALLOUT.match(text)
-            or _CALLOUT_TITLE.match(text)):
+    caption = _ICON.sub("", text)  # "! WARNING", "⚠ DANGER": the hazard icon drawn as a character
+    if len(caption.split()) > 2 and all(len(w) <= 2 for w in caption.split()):
+        caption = caption.replace(" ", "")  # letter-spaced: "WA R N I N G"
+    if (item.get("body") or _BULLET.match(text) or _SPEC_VALUE.search(text) or _CALLOUT.match(caption)
+            or _CALLOUT_TITLE.match(caption)):
         return None
+    if _MIRRORED_OR_NAV.match(text) and not _ARABIC.search(text):
+        return None  # "]AGL-AGN-AHM MODELS)*([ 9.0" (an English line mirrored in a right-to-left manual), "> Return to…"
     first = re.match(r"[^\W\d_]+", text)
     if first and first.group().islower() and not continuation:
         return None  # the middle of a wrapped sentence ("and condensate neutralizer…"), not a title
@@ -222,16 +245,34 @@ def _ocr_heading(text, confidence, continuation=False):
     return continuation or not words or words[-1].upper() not in _STOPWORDS
 
 
+def _join_heading_lines(lines, known=frozenset()):
+    """One heading from its lines. A word broken with a hyphen at a line's end is made whole ("CONFIGURA-" "TION") when
+    the whole word is used elsewhere in the document (known); else the hyphen is a dash ("PROCEDURE-" "BMS …")."""
+    text = lines[0]
+    for line in lines[1:]:
+        head, tail = re.search(r"([A-Za-z]+)-$", text), re.match(r"[A-Za-z]+", line)
+        if head and tail and (head.group(1) + tail.group()).lower() in known:
+            text = text[:-1] + line
+        else:
+            text += " " + line
+    return text
+
+
+def _document_words(pages):
+    return frozenset(w.lower() for page in pages for i in page if i["kind"] == "text"
+                     for w in re.findall(r"[A-Za-z]{4,}", i["text"]))
+
+
 def _join_wrapped(pages, body):
     """Back-to-back heading lines of one size become one heading line; if the joined text is too long to be a heading,
     every line of the run is marked as body text (a big-font paragraph, a run of form labels)."""
-    out = []
+    out, known = [], _document_words(pages)
     for page in pages:
         items, run = [], []
 
         def close():
             if len(run) > 1:
-                joined = dict(run[0], text=" ".join(" ".join(i["text"].split()) for i in run),
+                joined = dict(run[0], text=_join_heading_lines([" ".join(i["text"].split()) for i in run], known),
                               bold=any(i.get("bold") for i in run))
                 if len(run) <= MAX_HEADING_LINES and _heading_size(joined, body) is not None:
                     items.append(joined)
@@ -245,7 +286,8 @@ def _join_wrapped(pages, body):
             size = _heading_size(item, body) if item["kind"] == "text" else None
             if size is None and run and item["kind"] == "text":
                 size = _heading_size(item, body, continuation=True)
-            if size is None or (run and _heading_size(run[0], body) != size):
+            ampersand = bool(run) and size is not None and item["text"].lstrip().startswith("& ")  # "& STATE-OF-THE-ART…"
+            if size is None or (run and _heading_size(run[0], body) != size and not ampersand):
                 close()
             if size is None:
                 items.append(item)

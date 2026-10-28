@@ -4,17 +4,7 @@ Three Ruud documents stay untagged forever (kb ids 114, 317, 318). Each has the 
 ---
 
 2026-10-28 10:26
-`./crawl status` says "47 manuals needing OCR", but most of those pages are not scans: 111 are Arabic (the has_text check counts Latin letters only), 73 are empty, and about 120 hold only "Notes", a page number, "Intentionally left empty", ES/FR headers or a diagram caption. The count overstates what OCR could still add.
-
----
-
-2026-10-28 10:26
 Decide whether pages with only a caption or page number (mostly diagrams, e.g. "9. WIRING DIAGRAM") should also get OCR. Today OCR only reads pages with no text at all. More OCR there means more diagram-label junk.
-
----
-
-2026-10-28 10:26
-Two odd headings come from normal text-layer pages, not OCR: "]AGL-AGN-AHM MODELS)*([ 9.0" (document 375, pages 14-30) and "! CAUTION" (document 385, pages 7-12). The sectioner's existing rules let them through. Left as is.
 
 ---
 
@@ -38,7 +28,7 @@ Cold rebuild (empty layout cache) took 21.8 min with 2 workers, using 609 MB of 
 
 ---
 
-2026-10-28 10:26
-All the OCR, heading and rebuild-speed work is uncommitted (Dockerfile, crawler/ocrchild.py, textextract.py, sections.py, kb.py, __main__.py, eval/ruud.json, three new test files and three changed ones). Full suite 785 passed. Ready for you to commit.
+2026-10-28 10:54
+Small heading leftovers, not fixed: footnote-like lines become headings in two places ("*YES" in document 327 p.19 under the System Sentinel troubleshooting guide, "*S or V" in document 376 p.1); the EcoNet guide's "> Return to Table of Contents" line is no longer a heading but stays in the section text on every page (document 84). Also, short top-level sections in brochures merge into the next one and take an empty path (document 68 p.4, "PRECISE PERFORMANCE & STATE-OF-THE-ART FEATURES"); that is the sectioner's merge rule, the heading stays as a line in the text.
 
 ---
