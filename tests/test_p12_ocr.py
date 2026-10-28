@@ -277,3 +277,42 @@ def test_a_notes_blank_number_or_language_page_is_not_read_with_ocr(caption, mon
     pdf = caption_over_picture(caption, picture_pdf(picture_page("", BODY)))
     assert crawler.textextract.extract_pdf(pdf).ocr_pages == set()
     crawler.textextract.extract_layout(pdf)
+
+
+# ---------------------------------------------------------------- one bad page (review finding 4, 2026-10-28)
+
+def flaky_ocr(bad, calls):
+    """An OCR child that fails whenever it is given one of the bad pages, and reads every other page."""
+    from crawler.textextract import ExtractError
+
+    def child(data, indexes, memory):
+        calls.append(list(indexes))
+        if set(indexes) & bad:
+            raise ExtractError("the OCR reader ran out of time")
+        return {str(n): [{"text": BODY, "size": 12.0, "confidence": 95}] for n in indexes}
+    return child
+
+
+def test_one_page_ocr_cannot_read_does_not_stop_the_others_and_is_not_tried_again(monkeypatch):
+    import crawler.textextract
+    calls = []
+    monkeypatch.setattr(crawler.textextract, "_run_child", lambda *a, **k: {"layout": [[], [], []], "rows": None})
+    monkeypatch.setattr(crawler.textextract, "_ocr_child", flaky_ocr({1}, calls))
+    pages = crawler.textextract.extract_layout(b"%PDF-1.4 three scanned pages")
+    assert [bool(p) for p in pages] == [True, False, True]
+    calls.clear()
+    assert crawler.textextract.extract_layout(b"%PDF-1.4 three scanned pages") == pages
+    assert calls == []  # the page that failed alone is remembered for this OCR reader
+
+
+def test_when_ocr_fails_on_every_page_sections_still_fail_and_nothing_is_remembered(monkeypatch):
+    import crawler.textextract
+    calls = []
+    monkeypatch.setattr(crawler.textextract, "_run_child", lambda *a, **k: {"layout": [[], []], "rows": None})
+    monkeypatch.setattr(crawler.textextract, "_ocr_child", flaky_ocr({0, 1}, calls))
+    with pytest.raises(crawler.textextract.ExtractError):
+        crawler.textextract.extract_layout(b"%PDF-1.4 two scanned pages")
+    calls.clear()
+    with pytest.raises(crawler.textextract.ExtractError):
+        crawler.textextract.extract_layout(b"%PDF-1.4 two scanned pages")
+    assert calls  # a broken reader is tried again next run

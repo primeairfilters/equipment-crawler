@@ -251,6 +251,19 @@ def test_the_same_pdf_at_two_addresses_is_one_document_with_two_addresses(world)
         (len(body), "application/pdf", f"{sha}.pdf"),)
 
 
+def test_a_pdf_served_as_octet_stream_is_kept_in_the_library_as_a_pdf(world):
+    """files.myrheem.com serves some manuals as application/octet-stream; the original must still be kept."""
+    start(world)
+    body = make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2"]])
+    serve(world, "/start", "/a.pdf")
+    world.site.route("/a.pdf", body, headers={"Content-Type": "application/octet-stream"})
+    crawl(world)
+    sha = hashlib.sha256(body).hexdigest()
+    assert os.path.exists(os.path.join(os.environ["DOCS_DIR"], f"{sha}.pdf"))
+    assert world.one("SELECT size_bytes, mime_type, storage_key FROM files WHERE sha256 = %s", (sha,)) == (
+        (len(body), "application/pdf", f"{sha}.pdf"),)
+
+
 def test_a_changed_pdf_is_a_new_document_that_replaces_the_old_one(world):
     start(world)
     serve(world, "/start", "/a.pdf")

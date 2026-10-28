@@ -344,3 +344,61 @@ def test_going_back_to_an_earlier_version_rebuilds_from_the_latest_build_not_any
     live_versions = {r[0] for r in q(runtime_conn, "SELECT DISTINCT sectioner_version FROM sections WHERE document_id = %s "
                                                    "AND is_live", (doc,))}
     assert live_versions == {crawler.kb.build_version()}
+
+
+def test_a_build_works_out_its_version_once_not_per_section(runtime_conn, monkeypatch):
+    """build_version() hashes three files; it ran for every section inserted (review finding 6, 2026-10-28)."""
+    import crawler.kb
+    from crawler.kb import build
+    doc, _, _ = document(runtime_conn)
+    calls, real = [], crawler.kb.build_version
+    monkeypatch.setattr(crawler.kb, "build_version", lambda: calls.append(1) or real())
+    assert build(runtime_conn, doc, pages=PAGES) == 1
+    assert q(runtime_conn, "SELECT COUNT(*) FROM sections WHERE document_id = %s", (doc,))[0][0] > 1
+    assert len(calls) == 1
+
+
+def test_stopping_children_ends_a_running_pdf_read_at_once(tmp_path, monkeypatch):
+    """Readers run in their own session, so Ctrl-C does not reach them; `sections` waited for each running read to
+    finish (review finding 6, 2026-10-28). stop_children ends them."""
+    import crawler.textextract as textextract
+    slow = tmp_path / "slow-reader"
+    slow.write_text("#!/bin/sh\nexec sleep 60\n")
+    slow.chmod(0o755)
+    monkeypatch.setattr(textextract.sys, "executable", str(slow))
+    errors = []
+
+    def read():
+        try:
+            textextract._run_child(b"%PDF-1.4", [], 60, textextract.PDF_MEMORY_BYTES)
+        except textextract.ExtractError as exc:
+            errors.append(exc)
+
+    reader = threading.Thread(target=read)
+    started = time.monotonic()
+    reader.start()
+    while not textextract._running and time.monotonic() - started < 5:
+        time.sleep(0.01)
+    textextract.stop_children()
+    reader.join(timeout=5)
+    assert not reader.is_alive() and errors and time.monotonic() - started < 5
+
+
+def test_an_interrupted_sections_run_stops_the_running_reads(runtime_conn, monkeypatch):
+    import crawler.kb
+    import crawler.textextract
+    from crawler.kb import build_and_publish
+    document(runtime_conn)
+    stopped = []
+    monkeypatch.setattr(crawler.kb, "document_pages", lambda conn, d, **kw: PAGES)
+    monkeypatch.setattr(crawler.textextract, "stop_children", lambda: stopped.append(1))
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(crawler.kb, "_build_one", interrupt)  # while reads run
+    try:
+        build_and_publish(runtime_conn)
+    except KeyboardInterrupt:
+        pass
+    assert stopped

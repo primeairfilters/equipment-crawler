@@ -210,7 +210,8 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
 def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
     """{page index: [line, ...]} for the pages OCR could read in English (user, 2026-10-28: English only; a page that
     reads as Spanish or French is left out). Nothing when Tesseract is not installed or OCR fails. Results are kept in
-    the library (DOCS_DIR/.ocr/<sha>.json), so `reread` and `sections` read a page once."""
+    the library (DOCS_DIR/.ocr/<sha>.json), so `reread` and `sections` read a page once. When the reader fails on a
+    set of pages, each is read alone; a page that fails alone is kept as empty for this reader (_ocr_reader)."""
     import shutil
     from crawler.sections import _language
     if not indexes or shutil.which("tesseract") is None:
@@ -230,9 +231,16 @@ def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
         try:
             cache.update(_ocr_child(data, missing, memory))
         except ExtractError:
-            if strict:  # sections: a build without its scanned pages must not replace a good one (kb._build_one)
-                raise
-            return {}  # crawl and reread: the page stays without text and a later reread tries again
+            read = {}
+            if len(missing) > 1:  # one page the reader cannot finish must not cost the others: read each alone
+                for n in missing:
+                    with contextlib.suppress(ExtractError):
+                        read.update(_ocr_child(data, [n], memory))
+            if not read:  # OCR itself may be broken: remember nothing, so the next run tries again
+                if strict:  # sections: a build without its scanned pages must not replace a good one (kb._build_one)
+                    raise
+                return {}  # crawl and reread: the page stays without text and a later reread tries again
+            cache.update(read)  # a page that failed alone is kept below as read with no text, not tried every run
         for n in missing:
             cache.setdefault(str(n), [])
         if path is not None:
@@ -270,6 +278,19 @@ def drawn_text(rows):
     return drawn >= DRAWN_TEXT_MIN_LINES and drawn >= DRAWN_TEXT_SHARE * (drawn + real)
 
 
+_running = set()  # reader processes now running, so an interrupted run can end them (stop_children)
+_running_lock = threading.Lock()
+
+
+def stop_children():
+    """End every running reader at once: each runs in its own session, so Ctrl-C does not reach it."""
+    with _running_lock:
+        running = list(_running)
+    for proc in running:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
 def _run_child(data, args, timeout, memory, child="pdfchild.py"):
     """The child sets its own memory limit (CHILD_MEMORY_BYTES) first thing: preexec_fn is not safe once `sections`
     starts readers from threads."""
@@ -282,12 +303,17 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
     except OSError as exc:
         raise ExtractError(f"could not start the PDF reader: {exc}") from exc
+    with _running_lock:
+        _running.add(proc)
     try:
         out, _ = proc.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
         raise ExtractError("the PDF took too long to read") from exc
+    finally:
+        with _running_lock:
+            _running.discard(proc)
     if proc.returncode != 0:
         raise ExtractError("could not read the PDF")
     if len(out) > PDF_MAX_OUTPUT_BYTES:

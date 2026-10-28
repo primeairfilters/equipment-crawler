@@ -15,6 +15,7 @@ from decimal import Decimal
 from crawler import ai
 from crawler.brands import UnknownTarget, find_brand
 from crawler.db import try_lock, unlock
+from crawler.kb import hide
 from crawler.store import save_document
 from crawler.verify import verify
 
@@ -276,17 +277,21 @@ def extract_pass(conn, client, *, brand=None, model=ai.HAIKU, cap_usd=None, now=
 def copy_twin_tags(conn, brand_id=None):
     """A document whose text was already read under another file (its pages are "already read") never gets its own
     answer: it takes the tags, title and models of the tagged document with the same text (user, 2026-10-28). Same
-    form number and language: the form-number rule (D55) links one to the other. Free. Returns how many."""
+    form number and language: the form-number rule (D55) links one to the other. A twin of a hidden manual is hidden
+    too; a retired twin is not copied. Free. Returns how many."""
     twins = _rows(conn,
                   "SELECT DISTINCT ON (d.id) d.id, d.content_sha, p.id, p.url, p.brand_id, t.id, t.title, t.doc_type, "
-                  "t.trade, t.equipment_type, t.language, t.form_number, t.tagged_by, t.tagger_version "
+                  "t.trade, t.equipment_type, t.language, t.form_number, t.tagged_by, t.tagger_version, "
+                  "d.hidden_at IS NULL AND t.hidden_at IS NOT NULL, t.hidden_reason "
                   "FROM documents d JOIN document_urls du ON du.document_id = d.id JOIN pages p ON p.id = du.page_id "
                   "JOIN pages tp ON tp.ai_extracted_sha = p.ai_extracted_sha AND tp.id <> p.id "
                   "JOIN document_urls tdu ON tdu.page_id = tp.id JOIN documents t ON t.id = tdu.document_id "
                   "WHERE d.doc_type IS NULL AND t.doc_type IS NOT NULL AND t.id <> d.id AND p.extraction_status = 'extracted' "
+                  "AND d.content_sha = p.content_sha AND t.content_sha = tp.content_sha "  # each page's current version
+                  "AND t.state <> 'retired' "  # its form number would make the copy replace the newer version
                   "AND (%s::bigint IS NULL OR p.brand_id = %s) ORDER BY d.id, t.id", (brand_id, brand_id))
     for (doc_id, sha, page_id, url, page_brand, twin_id, title, doc_type, trade, equipment_type, language, form,
-         tagged_by, version) in twins:
+         tagged_by, version, hide_it, hidden_reason) in twins:
         models = [{"model_number": m} for (m,) in _rows(
             conn, "SELECT m.model_number FROM document_models dm JOIN models m ON m.id = dm.model_id "
                   "WHERE dm.document_id = %s ORDER BY m.id", (twin_id,))]
@@ -294,6 +299,8 @@ def copy_twin_tags(conn, brand_id=None):
                       models=models, extracted_by=tagged_by, doc_type=doc_type,
                       tags={"trade": trade, "equipment_type": equipment_type, "language": language, "form_number": form},
                       tagger_version=version)
+        if hide_it:  # the same text as a hidden manual stays hidden, like its new version (D56)
+            hide(conn, "document", doc_id, reason=hidden_reason, by_whom="crawler: same text as a hidden manual")
     return len(twins)
 
 

@@ -100,13 +100,15 @@ def search(conn, question, vector, documents=None, manufacturer_id=None, top=TOP
         own = model_key(model)
         codes = {c for c in codes if not (own.startswith(c) or c.startswith(own))}
     # the HNSW index hands back at most hnsw.ef_search rows (default 40) before the filters, fewer than DEPTH: widen it
-    # and let it keep scanning past filtered rows, for this transaction only (same speed on the eval, 2026-10-28)
-    _rows(conn, "SELECT set_config('hnsw.ef_search', %s, true), set_config('hnsw.iterative_scan', 'strict_order', true)",
-          (str(EF_SEARCH),))
-    rows = _rows(conn, SEARCH_SQL, {"question": question, "vector": _vector_literal(vector),
-                                    "codes": sorted(codes), "documents": documents,
-                                    "manufacturer": manufacturer_id, "language": language, "depth": DEPTH, "top": top,
-                                    "max_distance": MAX_DISTANCE})
+    # and let it keep scanning past filtered rows, for this transaction only (same speed on the eval, 2026-10-28); one
+    # transaction around both, so the settings reach the search on an autocommit or pooled connection too
+    with conn.transaction():
+        _rows(conn, "SELECT set_config('hnsw.ef_search', %s, true), "
+                    "set_config('hnsw.iterative_scan', 'strict_order', true)", (str(EF_SEARCH),))
+        rows = _rows(conn, SEARCH_SQL, {"question": question, "vector": _vector_literal(vector),
+                                        "codes": sorted(codes), "documents": documents,
+                                        "manufacturer": manufacturer_id, "language": language, "depth": DEPTH,
+                                        "top": top, "max_distance": MAX_DISTANCE})
     return [Hit(*r[:11], float(r[11]), r[12], None if r[13] is None else float(r[13]), r[14], r[15]) for r in rows]
 
 

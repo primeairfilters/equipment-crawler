@@ -350,19 +350,23 @@ def test_a_60_mb_pdf_is_fetched(ruud):
 
 # ---------------------------------------------------------------- an untagged twin takes the tags (user decision)
 
-def twin_documents(conn, form_line="Form No. A22-336 Rev. 4"):
-    """Two different PDF files with the same text: two documents. Tagging reads the text once."""
+def twin_documents(conn, form_line="Form No. A22-336 Rev. 4", old_on=None):
+    """Two different PDF files with the same text: two documents. Tagging reads the text once. old_on: the twin
+    (0 or 1) whose address served an earlier PDF first (a page keeps a document_urls row per version); returns
+    its document id last."""
     from crawler.documents import record_pdf
     from p3support import make_page, make_pdf
     name, brand_id = new_brand(conn)
     lines = ["Ruud RA15AZ Installation Instructions", "Model RA15AZ24AJ3CA", form_line, "SEER2 15.2"]
-    docs = []
+    docs, old = [], None
     for n, drawings in enumerate((None, [["0 0 m 10 10 l S"]])):  # a drawn line: other bytes, same text
         body = make_pdf([lines], drawings=drawings)
         url = f"http://p3.test/twin{n}.pdf"
         page_id = make_page(conn, brand_id, body, is_pdf=True, url=url)
+        if n == old_on:
+            old = record_pdf(conn, brand_id, page_id, url, make_pdf([["Ruud RA15AZ Installation Instructions Rev. A"]]))
         docs.append(record_pdf(conn, brand_id, page_id, url, body))
-    return name, docs
+    return (name, docs) if old_on is None else (name, docs, old)
 
 
 def tags_answer():
@@ -393,6 +397,55 @@ def test_twins_with_the_same_form_number_keep_one_live(runtime_conn):
     settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
     replaces = dict(q(runtime_conn, "SELECT id, replaces_id FROM documents WHERE id IN (%s, %s)", (one, two)))
     assert sorted(v for v in replaces.values() if v) in ([one], [two])
+
+
+def test_an_older_version_on_the_copying_page_is_not_tagged(runtime_conn):
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two), old = twin_documents(runtime_conn, old_on=1)
+    settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
+    assert q(runtime_conn, "SELECT doc_type, state FROM documents WHERE id = %s", (old,)) == ((None, "new"),)
+    assert q(runtime_conn, "SELECT doc_type FROM documents WHERE id = %s", (two,)) == (("install_manual",),)
+
+
+def test_tags_are_copied_from_the_twin_page_s_current_version_not_an_older_one(runtime_conn):
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two), old = twin_documents(runtime_conn, old_on=0)
+    q(runtime_conn, "UPDATE documents SET doc_type = 'spec_sheet', tagged_by = 'ai:claude-haiku-5-5', state = 'tagged' WHERE id = %s RETURNING id", (old,))
+    settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
+    assert q(runtime_conn, "SELECT doc_type FROM documents WHERE id = %s", (two,)) == (("install_manual",),)
+
+
+def test_tags_are_not_copied_from_a_retired_twin(runtime_conn):
+    """A retired twin's form number would make the copy replace the newer version that retired it."""
+    from crawler.extract import copy_twin_tags
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two) = twin_documents(runtime_conn)
+    settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
+    q(runtime_conn, "UPDATE documents SET doc_type = NULL, state = 'new', form_number = NULL, replaces_id = NULL "
+                    "WHERE id = %s RETURNING id", (two,))
+    q(runtime_conn, "UPDATE documents SET state = 'retired' WHERE id = %s RETURNING id", (one,))
+    assert copy_twin_tags(runtime_conn) == 0
+    assert q(runtime_conn, "SELECT doc_type FROM documents WHERE id = %s", (two,)) == ((None,),)
+
+
+def test_a_twin_of_a_hidden_manual_takes_its_tags_and_is_hidden_too(runtime_conn):
+    """Like a new version of a hidden manual (D56): the same text under another file stays hidden (user, 2026-10-28)."""
+    from crawler.extract import copy_twin_tags
+    from crawler.kb import hide
+    from fakeai import FakeAI
+    from p3support import settle
+    name, (one, two) = twin_documents(runtime_conn)
+    settle(runtime_conn, FakeAI(lambda r: tags_answer()), name)
+    q(runtime_conn, "UPDATE documents SET doc_type = NULL, state = 'new' WHERE id = %s RETURNING id", (two,))
+    hide(runtime_conn, "document", one, reason="wrong brand", by_whom="user")
+    assert copy_twin_tags(runtime_conn) == 1
+    assert q(runtime_conn, "SELECT doc_type, hidden_reason FROM documents WHERE id = %s", (two,)) == (
+        ("install_manual", "wrong brand"),)
+    assert q(runtime_conn, "SELECT hidden, reason FROM visibility_log WHERE target_type = 'document' AND target_id = %s",
+             (two,)) == ((True, "wrong brand"),)
 
 
 def test_short_top_level_sections_merged_together_keep_the_first_heading():

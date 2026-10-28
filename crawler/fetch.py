@@ -520,6 +520,7 @@ class Fetcher:
             is_pdf = kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
+            mime = "application/pdf" if is_pdf else kind_of(raw.headers)  # octet-stream PDFs are kept as PDFs
 
             sha = hashlib.sha256(raw.body).hexdigest()
             cols = {
@@ -543,9 +544,9 @@ class Fetcher:
             self._host_ok(host_id)
             if unchanged:
                 return Result("not_modified", http_status=raw.status, url=current, is_pdf=is_pdf, page_id=page_id,
-                              body=raw.body if is_pdf else b"", mime=kind_of(raw.headers))
+                              body=raw.body if is_pdf else b"", mime=mime)
             return Result("fetched", http_status=raw.status, body=raw.body, url=current, is_pdf=is_pdf,
-                          page_id=page_id, mime=kind_of(raw.headers))
+                          page_id=page_id, mime=mime)
 
         return failed("redirects")
 

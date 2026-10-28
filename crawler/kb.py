@@ -112,9 +112,10 @@ def build(conn, document_id, *, pages=None, problems=None, original=None):
                 f"doc_type, language) IS DISTINCT FROM (%s, %s, %s, %s, COALESCE({own}, %s))",
           (*filters.values(), document_id, *filters.values()))  # tags changed since a build: keep the copies true
     latest = _rows(conn, "SELECT COALESCE(MAX(build), 0) FROM sections WHERE document_id = %s", (document_id,))[0][0]
+    version = build_version()  # it hashes three files: once per build, not per section
     if latest and _same_sections(conn, document_id, latest, sections):
         _exec(conn, "UPDATE sections SET sectioner_version = %s WHERE document_id = %s AND build = %s "
-                    "AND sectioner_version <> %s", (build_version(), document_id, latest, build_version()))
+                    "AND sectioner_version <> %s", (version, document_id, latest, version))
         return None
     if not sections:
         return None
@@ -129,7 +130,7 @@ def build(conn, document_id, *, pages=None, problems=None, original=None):
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (document_id, number, n, s.page_from, s.page_to, s.heading_path, s.kind, s.body, s.body_sha, s.token_count,
                  list(s.flags), *list(filters.values())[:4], _own_language(s) or filters["language"],
-                 build_version()))[0][0]
+                 version))[0][0]
             for term in sorted(terms(s.heading_path + "\n" + s.body)):
                 _exec(conn, "INSERT INTO section_terms (term, section_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                       (term, section_id))
@@ -243,6 +244,9 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
             _next_from(ahead, conn, summary, after_document)
         while ahead:
             _next_from(ahead, conn, summary, after_document)
+    except BaseException:
+        textextract.stop_children()  # Ctrl-C or an error: end the running reads instead of waiting for them
+        raise
     finally:
         pool.shutdown(wait=True, cancel_futures=True)  # on an error or Ctrl-C: drop the reads not started
     return summary

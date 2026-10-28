@@ -343,3 +343,22 @@ def test_the_meaning_search_asks_the_vector_index_for_every_candidate_it_needs(r
     search(runtime_conn, "subcooling", BagEmbedder().embed(["subcooling"])[0][0], top=5)
     ef = int(q(runtime_conn, "SHOW hnsw.ef_search")[0][0])
     assert ef >= 8 * DEPTH and q(runtime_conn, "SHOW hnsw.iterative_scan")[0][0] == "strict_order"
+
+
+def test_the_index_settings_reach_the_search_on_an_autocommit_connection(monkeypatch):
+    """set_config(..., true) lasts one transaction: on an autocommit or pooled connection (maybe Breeze's) it ended
+    before the search ran (review finding 5, 2026-10-28)."""
+    import crawler.search
+    from crawler.db import connect
+    from crawler.search import DEPTH, SEARCH_SQL
+    seen, real = [], crawler.search._rows
+
+    def spy(conn, sql, args=()):
+        if sql is SEARCH_SQL:
+            seen.append(real(conn, "SHOW hnsw.ef_search")[0][0])  # '' once the setting is gone
+        return real(conn, sql, args)
+
+    monkeypatch.setattr(crawler.search, "_rows", spy)
+    with connect("runtime", autocommit=True) as conn:
+        crawler.search.search(conn, "subcooling", BagEmbedder().embed(["subcooling"])[0][0], top=5)
+    assert seen and seen[0].isdigit() and int(seen[0]) >= 8 * DEPTH
