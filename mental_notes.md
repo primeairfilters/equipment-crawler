@@ -1,5 +1,6 @@
-## 2026-10-28 13:29
-Eval baseline is now 17/25 top 5 (MRR 0.485) with exact-equivalent vector search, on 359 live documents. The earlier 19/25 was partly the approximate index's luck before a prune; none of today's code changes moved it (checked by rebuilding with each change reverted, and with all of them reverted). Misses: RMHPHDA068 dimensions, Sky-35 relay amps, EcoNet superheat screen, 120 V conversion kit, A2L vacuum pump/leak detector, error code 33, parts contact for commercial water heaters, nitrogen pressure test. Tuning waits for the real tech questions (user decision).
+## 2026-10-29 10:00
+
+Eval baseline is now 19/25 top 5 (MRR 0.474) on 599 live Ruud documents, after search started boosting the equipment type the question names (EQUIPMENT_BOOST 1.5 in crawler/search.py). Misses: RMHPHDA068 dimensions, Sky-35 relay amps, EcoNet superheat screen, 120 V conversion kit, A2L vacuum pump/leak detector, error code 33. Further tuning waits for the real tech questions (user decision). The eval keeps no per-question baseline, so finding which question moved takes digging; consider saving each run's per-question output (for example eval/ruud.last.txt) and diffing against it.
 
 ---
 
@@ -24,11 +25,6 @@ Two Floating Air R-454B service manuals are cut at PDF_MAX_PAGES = 200 (crawler/
 ## 2026-10-28 19:22
 
 Ruud batch 6: 20 of the 49 failures are `bad_content_type` on image and installer links (media.ruud.com/...jpg, .png, CertiSpec3Setup.exe). The crawler downloads them, rejects them, and marks them failed, so the doubling backoff will keep retrying them for up to 30 days. Decide whether links ending in image/exe extensions should be skipped before fetching, or marked refused (never retried) instead of failed. The other failures are 29 http_404 and 19 older ones with no recorded reason (from before migration 0006).
-
----
-## 2026-10-28 19:45
-
-Search ranking after Ruud batch 6: eval is 16/25 (MRR 0.456), down from 17/25. The lost question is "How long does defrost run on the ductless heat pump and is it normal for the fans to stop?": a new rooftop-unit manual (doc 1265, DOAS RTU, p.88-90 "Heating, Cooling, Defrost, and Reheat") and a commercial heat pump spec sheet (doc 1258) now rank above the ductless manuals (docs 70, 72, 73). Search does not use the equipment type named in the question ("ductless", "mini split", "water heater") to filter or boost results, so the more commercial manuals get added, the more they crowd out residential answers. Decide whether search should detect the equipment type in the question and prefer sections of that type. Also: eval prints no per-question baseline we keep, so a drop like this takes digging to locate; consider saving each eval run's per-question output (for example eval/ruud.last.txt) and diffing against it.
 
 ---
 ## 2026-10-28 20:05

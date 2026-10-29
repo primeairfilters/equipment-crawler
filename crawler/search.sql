@@ -7,7 +7,8 @@
 --   codes:   section_terms, exact codes from the question (E4, LOPS, part and model numbers), most codes matched first
 -- Parameters: question text, question vector ('[..]'), codes (text[]), documents (bigint[] or NULL), manufacturer
 -- (integer or NULL), language (a section's own language, or NULL for any), depth (rows per way), top (rows
--- returned), max_distance.
+-- returned), max_distance, equipment (text[]: the equipment types the question names, from EQUIPMENT_WORDS in
+-- crawler/search.py; empty for none) and boost (a section of one of those types has its merged score times this).
 WITH meaning AS (
   SELECT v.section_id, v.embedding <=> %(vector)s::halfvec AS distance
   FROM kb.section_vectors_te3s_1536 v JOIN kb.sections s ON s.id = v.section_id
@@ -62,5 +63,6 @@ WITH meaning AS (
 SELECT f.section_id, s.document_id, d.title, s.doc_type, s.page_from, s.page_to, d.canonical_url, s.heading_path,
        s.kind, s.body, d.content_sha, f.score, f.meaning_rank, f.distance, f.words_rank, f.codes_rank
 FROM fused f JOIN kb.sections s ON s.id = f.section_id JOIN kb.documents d ON d.id = s.document_id
-ORDER BY f.score DESC, f.section_id
+ORDER BY f.score * CASE WHEN s.equipment_type = ANY (%(equipment)s::text[]) THEN %(boost)s ELSE 1 END DESC,
+         f.section_id
 LIMIT %(top)s

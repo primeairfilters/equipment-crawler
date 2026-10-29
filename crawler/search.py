@@ -13,6 +13,7 @@ The question is embedded as Breeze will embed it: the plain question, same model
 logged in ai_calls (purpose 'ask') and checked against the monthly cap first. Read only otherwise; callers commit.
 """
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -31,6 +32,24 @@ MAX_DISTANCE = 0.8  # a meaning match further than this is noise, not a match
 WIDEN_DISTANCE = 0.6  # to be tuned with ./crawl eval
 TOP = 8
 LANGUAGE = "en"  # Breeze's techs ask in English
+EQUIPMENT_BOOST = 1.5  # a section of the equipment the question names: its merged score times this (a boost, not a
+# filter: AI tags are not always right, doc 80 is a ductless manual tagged heat_pump). Ruud eval 2026-10-29: none 16/25,
+# 1.25 and 1.5 19/25 (1.5 a little higher MRR), 2.0 18/25 (a SEER2 answer in a guide tagged 'other' fell out)
+# The words a tech uses for each equipment type (documents.equipment_type), longest first: a phrase is taken out of the
+# question once matched, so "heat pump water heater" is not also "heat pump" plus "water heater", and "ductless heat
+# pump" is a mini split, not every heat pump. Breeze copies this list with search.sql.
+EQUIPMENT_WORDS = [
+    (r"heat pump water heaters?|hybrid water heaters?|hpwh", ["heat_pump", "water_heater"]),
+    (r"ductless( heat pumps?| splits?)?|mini[- ]?splits?|wall[- ]mount(ed)? (units?|splits?)", ["ductless_mini_split"]),
+    (r"(tankless )?water heaters?|tankless", ["water_heater"]),
+    (r"rooftop( units?)?|rtus?|packaged units?", ["packaged_unit"]),
+    (r"air handlers?", ["air_handler"]),
+    (r"heat pumps?", ["heat_pump"]),
+    (r"air conditioners?|split ac|ac units?|a/c", ["air_conditioner"]),
+    (r"furnaces?", ["furnace"]),
+    (r"boilers?", ["boiler"]),
+    (r"thermostats?|controllers?", ["thermostat_control"]),
+]
 
 
 class AskCapped(Exception):
@@ -92,6 +111,16 @@ def levels(conn, model=None, manufacturer=None):
     return out
 
 
+def equipment_types(question):
+    """The equipment types the question names (EQUIPMENT_WORDS), sorted; [] when it names none."""
+    text, found = " " + re.sub(r"\s+", " ", question.lower()) + " ", set()
+    for pattern, types in EQUIPMENT_WORDS:
+        text, n = re.subn(rf"(?<![\w-])({pattern})(?![\w-])", " ", text)
+        if n:
+            found.update(types)
+    return sorted(found)
+
+
 def search(conn, question, vector, documents=None, manufacturer_id=None, top=TOP, language=None, model=None):
     """model: the model the documents were narrowed by. Inside its own manuals its number (or a prefix of it, or a
     longer form) names nearly every section, so it is not a code match there."""
@@ -108,7 +137,8 @@ def search(conn, question, vector, documents=None, manufacturer_id=None, top=TOP
         rows = _rows(conn, SEARCH_SQL, {"question": question, "vector": _vector_literal(vector),
                                         "codes": sorted(codes), "documents": documents,
                                         "manufacturer": manufacturer_id, "language": language, "depth": DEPTH,
-                                        "top": top, "max_distance": MAX_DISTANCE})
+                                        "top": top, "max_distance": MAX_DISTANCE,
+                                        "equipment": equipment_types(question), "boost": EQUIPMENT_BOOST})
     return [Hit(*r[:11], float(r[11]), r[12], None if r[13] is None else float(r[13]), r[14], r[15]) for r in rows]
 
 

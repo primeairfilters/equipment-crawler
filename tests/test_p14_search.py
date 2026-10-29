@@ -362,3 +362,43 @@ def test_the_index_settings_reach_the_search_on_an_autocommit_connection(monkeyp
     with connect("runtime", autocommit=True) as conn:
         crawler.search.search(conn, "subcooling", BagEmbedder().embed(["subcooling"])[0][0], top=5)
     assert seen and seen[0].isdigit() and int(seen[0]) >= 8 * DEPTH
+
+
+# ---------------------------------------------------------------- tuning: the equipment the question names
+
+def test_the_equipment_a_question_names_is_read_from_its_words():
+    from crawler.search import equipment_types
+    assert equipment_types("How long does defrost run on the ductless heat pump?") == ["ductless_mini_split"]
+    assert equipment_types("Error code 33 on the R-454B wall mount mini split") == ["ductless_mini_split"]
+    assert equipment_types("Water hardness limits for the heat pump water heater") == ["heat_pump", "water_heater"]
+    assert equipment_types("100 gallon water heater is showing T122") == ["water_heater"]
+    assert equipment_types("Minimum SEER2 for a split AC installed in the Southeast") == ["air_conditioner"]
+    assert equipment_types("RTU economizer wiring on the rooftop unit") == ["packaged_unit"]
+    assert equipment_types("How do I wire a heat pump to the Sky-35 controller?") == ["heat_pump", "thermostat_control"]
+    assert equipment_types("What micron level should I pull the vacuum down to?") == []
+
+
+def typed(conn, monkeypatch, equipment, pages, brand_name):
+    doc, _ = manual(conn, monkeypatch, pages, brand_name=brand_name)
+    q(conn, "UPDATE documents SET equipment_type = %s WHERE id = %s", (equipment, doc))
+    q(conn, "UPDATE sections SET equipment_type = %s WHERE document_id = %s", (equipment, doc))
+    return doc
+
+
+def test_sections_of_the_equipment_the_question_names_come_first(runtime_conn, monkeypatch):
+    # Ruud batch 6: a rooftop unit's "Heating, Cooling, Defrost" section beat the ductless manuals for "How long does
+    # defrost run on the ductless heat pump"
+    from crawler.embed import embed_pass
+    from crawler.search import ask
+    section = [[t("Defrost Cycle", 14), t(words(300, "frost") + " Defrost runs up to ten minutes and the fans stop.")]]
+    rooftop = typed(runtime_conn, monkeypatch, "packaged_unit", section, "Typetest")
+    ductless = typed(runtime_conn, monkeypatch, "ductless_mini_split", section, "Typetest")
+    for n in range(4):  # filler, so rarity weights look like a real library
+        typed(runtime_conn, monkeypatch, "furnace", [[t(f"Venting {n}", 14), t(words(300, f"vent{n}x"))]], "Typetest")
+    embed_pass(runtime_conn, BagEmbedder(), cap_usd=5)
+    plain = ask(runtime_conn, BagEmbedder(), "How long does defrost run and do the fans stop?", manufacturer="Typetest",
+                cap_usd=5)
+    assert docs(plain)[:2] == [rooftop, ductless]  # same text: the older section first, as before
+    named = ask(runtime_conn, BagEmbedder(), "How long does defrost run on the ductless heat pump and do the fans stop?",
+                manufacturer="Typetest", cap_usd=5)
+    assert docs(named)[:2] == [ductless, rooftop]  # a boost, not a filter: the rooftop section is still there
