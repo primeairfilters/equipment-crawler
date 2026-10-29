@@ -228,6 +228,9 @@ def status(conn):
             conn, "SELECT COUNT(*), COALESCE(SUM(page_count - text_pages), 0) FROM documents d WHERE d.needs_ocr AND "
                   "EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id WHERE du.document_id = d.id "
                   "AND p.brand_id = %s)", (brand_id,))[0])
+        row["failed_reasons"] = {reason: int(n) for reason, n in _rows(
+            conn, "SELECT fail_reason, COUNT(*) FROM pages WHERE brand_id = %s AND fail_count > 0 "
+                  "GROUP BY fail_reason ORDER BY 2 DESC, 1", (brand_id,))}
         row["suggested_keywords"] = [r[0] for r in _rows(
             conn, "SELECT s.keyword FROM keyword_suggestions s WHERE s.brand_id = %s AND NOT EXISTS (SELECT 1 FROM "
                   "crawl_keywords k WHERE k.keyword = s.keyword AND (k.brand_id IS NULL OR k.brand_id = s.brand_id)) "

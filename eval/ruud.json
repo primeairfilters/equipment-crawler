@@ -25,7 +25,7 @@
   {"question": "How tall and wide is the RMHPHDA068?", "model": "RMHPHDA068",
    "expect": [{"document": "648b54bdcad9", "pages": [8, 8]}]},
   {"question": "Frost on the intake terminal and white chalk on the flame sensor of a commercial condensing water heater, what causes that?", "manufacturer": "Ruud",
-   "expect": [{"document": "7377890c2913", "pages": [18, 19]}]},
+   "expect": [{"document": "3305939d1db1", "pages": [18, 19]}]},
   {"question": "How many zones and dampers can the EcoNet zoning panel run?", "manufacturer": "Ruud",
    "expect": [{"document": "e1fbcd04750d", "pages": [1, 1]}]},
   {"question": "How do I wire a heat pump to the Sky-35 controller on RS-485?", "manufacturer": "Ruud",
@@ -52,7 +52,7 @@
   {"question": "Thermistor resistance chart for checking Floating Air sensors", "manufacturer": "Ruud",
    "expect": [{"document": "1d10b27ce9ec", "pages": [116, 116]}]},
   {"question": "Who do I call for parts on a commercial high efficiency water heater and what info do they need?", "manufacturer": "Ruud",
-   "expect": [{"document": "824e6f42c47e", "pages": [56, 56]}]},
+   "expect": [{"document": "997d7eb9eba3", "pages": [56, 56]}]},
   {"question": "Nitrogen pressure test steps before evacuating a ductless line set", "manufacturer": "Ruud",
    "expect": [{"document": "7eda67f4faf8", "pages": [40, 40]}, {"document": "531a200d1056", "pages": [17, 17]}]}
 ]

@@ -151,6 +151,9 @@ def _missed_lines(row):
         lines.append(f"{_plural(row['needs_ocr'], 'manual')} with {_plural(row['pages_without_text'], 'page')} no text "
                      "was read from (OCR reads empty English pages; others are Arabic, blank, Spanish/French or "
                      "diagrams)")
+    if row.get("failed_reasons"):  # no reason: failed before migration 0006 and not tried since
+        lines.append("failed: " + ", ".join(f"{reason or 'reason not recorded'} {n}"
+                                            for reason, n in row["failed_reasons"].items()))
     for reason, n in (row.get("keyword_skips") or {}).items():
         lines.append(f"{reason}: {n}")
     if row.get("suggested_keywords"):

@@ -457,3 +457,78 @@ def test_short_top_level_sections_merged_together_keep_the_first_heading():
             text_line("EASY-TO-CLEAN DESIGN", size=30.0), text_line(short.replace("comfort", "service"))]
     paths = [s.heading_path for s in build_sections([cover, page]) if s.page_from == 2]
     assert paths == ["PRECISE PERFORMANCE"]
+
+
+# ---------------------------------------------------------------- why a fetch failed; longer waits (2026-10-28)
+
+def page_failure(world, path):
+    return world.one("SELECT fetch_state, fail_reason, fail_count, next_check_at FROM pages WHERE url = %s",
+                     (world.url("ruud.test", path),))[0]
+
+
+def test_a_failed_fetch_records_why_and_a_later_success_clears_it(ruud):
+    """Three empty Ruud PDFs failed in batch 4 and only outside requests showed why (the reason was not stored)."""
+    ruud.site.route("/manual.pdf", b"", headers={"Content-Type": "application/pdf"})
+    get(ruud, "/manual.pdf")
+    assert page_failure(ruud, "/manual.pdf")[:3] == ("failed", "not_pdf", 1)
+    ruud.site.route("/manual.pdf", PDF_BYTES, headers={"Content-Type": "application/pdf"})
+    get(ruud, "/manual.pdf")
+    assert page_failure(ruud, "/manual.pdf")[:3] == ("fetched", None, 0)
+
+
+def test_each_failure_in_a_row_doubles_the_wait_up_to_30_days(ruud):
+    from datetime import timedelta
+    waits = []
+    for _ in range(7):
+        get(ruud, "/gone")
+        waits.append(page_failure(ruud, "/gone")[3] - ruud.clock.now())
+    assert waits == [timedelta(days=d) for d in (1, 2, 4, 8, 16, 30, 30)]
+
+
+def test_status_says_why_pages_failed():
+    from crawler.__main__ import _missed_lines
+    lines = _missed_lines({"failed_reasons": {"http_404": 15, "not_pdf": 3, None: 1}})
+    assert lines == ["failed: http_404 15, not_pdf 3, reason not recorded 1"]
+
+
+def test_status_counts_failed_pages_by_reason(ruud):
+    from crawler.brands import status
+    ruud.site.route("/manual.pdf", b"", headers={"Content-Type": "application/pdf"})
+    get(ruud, "/manual.pdf")
+    get(ruud, "/gone")
+    name = ruud.one("SELECT name FROM brands WHERE id = %s", (ruud.brand_id,))[0][0]
+    row = next(r for r in status(ruud.conn) if r["brand"] == name)
+    assert row["failed_reasons"] == {"http_404": 1, "not_pdf": 1}
+
+
+def tag_with_form(conn, doc, form="G22-546-SFS"):
+    from crawler.store import save_document
+    sha, page_id, url, brand_id = q(conn, "SELECT d.content_sha, du.page_id, du.url, p.brand_id FROM documents d "
+                                          "JOIN document_urls du ON du.document_id = d.id JOIN pages p ON p.id = du.page_id "
+                                          "WHERE d.id = %s LIMIT 1", (doc,))[0]
+    save_document(conn, brand_id=brand_id, page_id=page_id, source_url=url, title="RA15AZ", content_sha=sha, models=[],
+                  extracted_by="ai:claude-haiku-5-5", doc_type="spec_sheet",
+                  tags={"language": "en", "form_number": form})
+
+
+def replaces(conn, *docs):
+    return [q(conn, "SELECT replaces_id FROM documents WHERE id = %s", (d,))[0][0] for d in docs]
+
+
+def test_the_form_number_rule_links_twins_tagged_newest_first(runtime_conn):
+    """890 and 896 (form G22-546-SFS) were tagged in one pass, the newer first: when 896 looked for the version it
+    replaces, 890 had no form number yet, and 890 only looks for older documents. Both went live (2026-10-28)."""
+    name, (one, two) = twin_documents(runtime_conn)
+    tag_with_form(runtime_conn, two)
+    tag_with_form(runtime_conn, one)
+    assert replaces(runtime_conn, one, two) == [None, one]
+
+
+def test_the_form_number_rule_makes_a_chain_when_the_newest_is_tagged_before_the_middle_one(runtime_conn):
+    """59, then 1074 and 1079 (form M22-2527) tagged in one pass, 1079 first: both pointed at 59 and both went live
+    (2026-10-29). The chain is 59 <- 1074 <- 1079."""
+    name, (middle, newest), oldest = twin_documents(runtime_conn, old_on=0)
+    tag_with_form(runtime_conn, oldest)
+    tag_with_form(runtime_conn, newest)
+    tag_with_form(runtime_conn, middle)
+    assert replaces(runtime_conn, oldest, middle, newest) == [None, oldest, middle]

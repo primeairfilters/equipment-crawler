@@ -128,10 +128,17 @@ def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, mo
             (content_sha, manufacturer_id, title, source_url, doc_type, extracted_by, tagger_version,
              tags.get("trade"), tags.get("equipment_type"), tags.get("language"), tags.get("form_number")))
         if tags.get("form_number"):
+            # this document and any newer one with the same form: a newer one tagged first found nothing to replace, or
+            # an older version than this one (59 <- 1074 <- 1079, not both on 59)
             conn_exec(conn, "UPDATE documents d SET replaces_id = (SELECT o.id FROM documents o WHERE o.manufacturer_id = "
                             "d.manufacturer_id AND o.form_number = d.form_number AND o.language IS NOT DISTINCT FROM "
                             "d.language AND o.id <> d.id AND o.created_at <= d.created_at AND o.id < d.id "
-                            "ORDER BY o.id DESC LIMIT 1) WHERE d.id = %s AND d.replaces_id IS NULL",
+                            "ORDER BY o.id DESC LIMIT 1) FROM documents t WHERE t.id = %s AND d.id >= t.id "
+                            "AND d.manufacturer_id = t.manufacturer_id AND d.form_number = t.form_number "
+                            "AND d.language IS NOT DISTINCT FROM t.language AND (d.replaces_id IS NULL OR (d.id > t.id "
+                            "AND d.replaces_id < t.id AND EXISTS (SELECT 1 FROM documents r WHERE r.id = d.replaces_id "
+                            "AND r.manufacturer_id = t.manufacturer_id AND r.form_number = t.form_number "
+                            "AND r.language IS NOT DISTINCT FROM t.language)))",
                       (document_id,))
         # sections already built keep true copies of the tags; a manual retagged as not equipment leaves Breeze at once
         conn_exec(conn, "UPDATE sections s SET manufacturer_id = d.manufacturer_id, trade = d.trade, "

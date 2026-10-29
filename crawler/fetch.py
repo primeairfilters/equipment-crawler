@@ -38,7 +38,8 @@ ROBOTS_TTL = timedelta(hours=24)
 REST_AFTER_FAILURES = 5
 REST_FOR = timedelta(hours=24)
 RECHECK_AFTER = timedelta(days=30)
-RETRY_FAILED_AFTER = timedelta(days=1)
+RETRY_FAILED_AFTER = timedelta(days=1)  # doubled for each failure in a row, up to RETRY_FAILED_MAX
+RETRY_FAILED_MAX = timedelta(days=30)
 MAX_URL_LENGTH = 2000
 READ_DEADLINE_SECONDS = 120
 
@@ -186,11 +187,12 @@ class Fetcher:
 
     def _page(self, brand_id, url):
         rows = self._rows(
-            "SELECT id, content_sha, etag, last_modified, is_pdf FROM pages WHERE brand_id = %s AND url_sha = %s",
+            "SELECT id, content_sha, etag, last_modified, is_pdf, fail_count FROM pages WHERE brand_id = %s AND url_sha = %s",
             (brand_id, _sha(url)))
         if not rows:
             return None
-        return {"id": rows[0][0], "content_sha": rows[0][1], "etag": rows[0][2], "last_modified": rows[0][3], "is_pdf": rows[0][4]}
+        return {"id": rows[0][0], "content_sha": rows[0][1], "etag": rows[0][2], "last_modified": rows[0][3], "is_pdf": rows[0][4],
+                "fail_count": rows[0][5]}
 
     def due_info(self, brand_id, url):
         """(due, page_id). Not due when the page was checked recently and its next check is still ahead."""
@@ -447,7 +449,9 @@ class Fetcher:
                                    parent_id)
 
         def failed(reason, status=None, host_failure=False):
-            cols = {"next_check_at": self.now() + RETRY_FAILED_AFTER, "fetch_state": "failed"}
+            in_a_row = existing["fail_count"] if existing else 0  # a page that keeps failing is asked less often
+            wait = min(RETRY_FAILED_AFTER * 2 ** min(in_a_row, 10), RETRY_FAILED_MAX)
+            cols = {"next_check_at": self.now() + wait, "fetch_state": "failed", "fail_reason": reason[:40]}
             if status is not None:
                 cols["http_status"] = status
             page_id = save(cols, bump_fail=True)
@@ -506,7 +510,7 @@ class Fetcher:
             now = self.now()
             if raw.status == 304 and conditional:
                 page_id = save({"fetched_at": now, "next_check_at": now + RECHECK_AFTER, "fail_count": 0,
-                                "fetch_state": "fetched", "final_url": current})
+                                "fail_reason": None, "fetch_state": "fetched", "final_url": current})
                 self._host_ok(host_id)
                 return Result("not_modified", http_status=304, url=current, page_id=page_id)
             if not 200 <= raw.status < 300:
@@ -534,6 +538,7 @@ class Fetcher:
                 "fetched_at": now,
                 "next_check_at": now + RECHECK_AFTER,
                 "fail_count": 0,
+                "fail_reason": None,
                 "fetch_state": "fetched",
                 "final_url": current,
             }
