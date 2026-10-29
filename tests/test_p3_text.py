@@ -145,3 +145,9 @@ def test_indexing_changed_content_updates_the_text_in_place(runtime_conn):
     rows = q(runtime_conn, "SELECT text_sha, body FROM page_text WHERE page_id = %s AND page_number = 1", (page_id,))
     assert len(rows) == 1
     assert rows[0][0] != old and "16.0" in rows[0][1]
+
+
+def test_the_page_limit_reads_the_longest_ruud_manuals_whole():
+    # 2026-10-29: docs 799, 800 and 604 (251, 255 and 221 pages) were cut at 200
+    from crawler.textextract import PDF_MAX_PAGES
+    assert PDF_MAX_PAGES >= 255

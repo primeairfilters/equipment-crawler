@@ -1,5 +1,6 @@
 """Command line entry: python -m crawler <command>."""
 import argparse
+import os
 import shlex
 import sys
 
@@ -62,6 +63,15 @@ def build_parser():
         switch.add_argument("what", choices=["manual", "manufacturer"])
         switch.add_argument("target", help="the manual's id, or the manufacturer's name")
         switch.add_argument("--reason", required=True)
+    tag = sub.add_parser("tag", help="set a manual's tags by hand; the AI never overwrites them")
+    tag.add_argument("document", type=int, help="the manual's id")
+    tag.add_argument("--doc-type")
+    tag.add_argument("--equipment-type")
+    tag.add_argument("--trade")
+    different = sub.add_parser("not-duplicates", help="mark two manuals as different products; check stops listing them")
+    different.add_argument("first", type=int)
+    different.add_argument("second", type=int)
+    different.add_argument("--reason", required=True)
     sub.add_parser("check", help="a read-only health report of what Breeze can see")
     stop = sub.add_parser("stop", help="stop a brand or a host")
     stop.add_argument("target")
@@ -77,6 +87,8 @@ def build_parser():
     gap.add_argument("brand", nargs="?")
     reread = sub.add_parser("reread", help="read stored PDFs again that could not be read or need OCR (fetches nothing)")
     reread.add_argument("brand", nargs="?")
+    reread.add_argument("--document", type=int, action="append",
+                        help="read this document again by id (repeatable), e.g. one cut at an older page limit")
     extract = sub.add_parser("extract", help="read fetched documents with AI (collects finished batches, sends new ones)")
     extract.add_argument("brand", nargs="?")
     return parser
@@ -218,10 +230,39 @@ def _search_command(conn, args):
             hits = sum(1 for c in report["cases"] if c["rank"] and c["rank"] <= 5)
             print(f"top 5: {hits} of {len(report['cases'])} ({report['hit_at_5'] * 100:.0f}%); top 1: "
                   f"{report['hit_at_1'] * 100:.0f}%; MRR {report['mrr']:.3f}")
+            _eval_moves(args.file, {c["question"]: c["rank"] for c in report["cases"]})
     except AskCapped as exc:
         print(f"Stopped: {exc}.")
     finally:
         conn.commit()
+
+
+def _eval_moves(path, ranks):
+    """Print each question whose rank changed since the last run of this file, then keep this run's ranks in the
+    document library (DOCS_DIR/.eval/<file>.last.json; the repo is read-only in the container), so a score that moves
+    shows which question moved. A library that cannot be written only loses the comparison."""
+    import json
+    name = os.path.splitext(os.path.basename(path))[0] + ".last.json"
+    last_path = os.path.join(os.environ.get("DOCS_DIR") or os.path.dirname(os.path.abspath(path)), ".eval", name)
+    try:
+        with open(last_path, encoding="utf-8") as handle:
+            last = json.load(handle)
+    except (OSError, ValueError):
+        last = None
+    if last is None:
+        print("first run of this file: ranks kept for the next run")
+    else:
+        def shown(rank):
+            return f"#{rank}" if rank else "missed"
+        moved = [f"  {shown(last[q])} -> {shown(r)}  {q}" for q, r in ranks.items() if q in last and last[q] != r]
+        moved += [f"  new: {shown(r)}  {q}" for q, r in ranks.items() if q not in last]
+        print("moved since the last run:\n" + "\n".join(moved) if moved else "no question moved since the last run")
+    try:
+        os.makedirs(os.path.dirname(last_path), exist_ok=True)
+        with open(last_path, "w", encoding="utf-8") as handle:
+            json.dump(ranks, handle, indent=1)
+    except OSError as exc:
+        print(f"could not keep this run's ranks ({exc.strerror}): the next run has nothing to compare with")
 
 
 def _link_checker():
@@ -342,6 +383,18 @@ def main(argv):
                 switch = kb.hide if args.command == "hide" else kb.unhide
                 switch(conn, target_type, args.target, reason=args.reason, by_whom=getpass.getuser())
                 print(f"{args.command.capitalize()}: {args.what} {args.target}.")
+            elif args.command == "tag":
+                from crawler.kb import set_tags
+                done = set_tags(conn, args.document, doc_type=args.doc_type, equipment_type=args.equipment_type,
+                                trade=args.trade)
+                print(f"Document {args.document}: " + ", ".join(f"{k} {v}" for k, v in done.items())
+                      + " (set by hand; the AI will not change these).")
+            elif args.command == "not-duplicates":
+                import getpass
+                from crawler.kb import not_duplicates
+                first, second = not_duplicates(conn, args.first, args.second, reason=args.reason,
+                                               by_whom=getpass.getuser())
+                print(f"Marked {first} and {second} as different manuals; check will not list them as duplicates.")
             elif args.command == "check":
                 from crawler.kb import check
                 report = check(conn)
@@ -353,8 +406,15 @@ def main(argv):
                     if report[key]:
                         problems += 1
                         print(f"{len(report[key])} {words}: {report[key][:20]}")
-                print(f"{report['needs_ocr']} manuals need OCR. {report['live_without_vectors']} live sections have "
-                      "no vector yet (./crawl embed).")
+                print(f"{report['needs_ocr']} manuals have pages with no text even after OCR (blank, drawings, "
+                      f"Spanish/French). {report['live_without_vectors']} live sections have no vector yet "
+                      "(./crawl embed).")
+                if report["marked_different"]:
+                    print(f"{_plural(report['marked_different'], 'pair')} of manuals marked as different products "
+                          "(not listed as duplicates).")
+                if report["user_tags"]:
+                    print("tags set by hand: " + "; ".join(
+                        f"{doc} ({', '.join(f'{k} {v}' for k, v in fields.items())})" for doc, fields in report["user_tags"]))
                 for maker, trade, documents, sections in report["counts"]:
                     print(f"  {maker} / {trade}: {documents} live manuals, {sections} live sections")
                 print("No problems found." if not problems else f"{problems} kinds of problem found.")
@@ -366,7 +426,7 @@ def main(argv):
                 brand_id = brands.find_brand(conn, args.brand) if args.brand else None
                 if args.brand and brand_id is None:
                     raise brands.UnknownTarget(f"No brand called {args.brand}.")
-                result = reread(conn, brand_id, after_document=conn.commit)
+                result = reread(conn, brand_id, after_document=conn.commit, documents=args.document)
                 conn.commit()
                 print(f"Read {_plural(result['read'], 'document')} again; {result['unreadable']} still could not be read.")
             elif args.command == "stop":

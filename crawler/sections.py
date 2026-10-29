@@ -35,7 +35,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-SECTIONER_VERSION = "25"
+SECTIONER_VERSION = "27"
 MIN_WORDS = 300
 MAX_WORDS = 800
 WINDOW_WORDS = 500
@@ -210,6 +210,8 @@ def _heading_size(item, body, continuation=False):
         return None  # the middle of a wrapped sentence ("and condensate neutralizer…"), not a title
     if sum(c.isalpha() for c in text) < 3:  # icon and numeral debris ("Ii", "II") is no title
         return None
+    if set(re.sub(r"[^A-Za-z]", "", text)) <= set("Iil") or re.search(r"[{}]", text):
+        return None  # an icon font read as strokes and braces ("Iii:}", doc 800 p.118)
     if text.endswith((":", ",", ";", ".")) or not _WORDLIKE.search(text) or "\ufffd" in text or _ADDRESS.search(text):
         return None
     if sum(c.isdigit() for c in text) > len(text) / 2:
@@ -244,6 +246,8 @@ def _ocr_heading(text, confidence, continuation=False):
         return False  # a table's column names ("Number Tool Number Tool")
     if text.endswith("-"):
         return False  # a word hyphenated across lines: the line is the middle of a paragraph
+    if not re.search(r"[A-Za-z]{4,}", text):
+        return False  # an icon or logo read as a short word ("KEN" over the Floating Air remote control pages)
     return continuation or not words or words[-1].upper() not in _STOPWORDS
 
 

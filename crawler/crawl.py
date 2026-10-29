@@ -11,7 +11,7 @@ the library, and every PDF becomes a document. A feed start address is a JSON do
 import hashlib
 import heapq
 import re
-from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urldefrag, urljoin, urlsplit, urlunsplit
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -62,11 +62,26 @@ def page_context(body, url):
 
 
 def _seen_key(url):
-    """/x and /x/ are one page; the root stays as it is."""
+    """/x and /x/ are one page, and so are a path written plain and percent-encoded ("/A B®" and "/A%20B%C2%AE"); the
+    root stays as it is."""
     parts = urlsplit(url)
-    if len(parts.path) > 1 and parts.path.endswith("/"):
-        return urlunsplit(parts._replace(path=parts.path[:-1]))
-    return url
+    path = unquote(parts.path)
+    if len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+    return urlunsplit(parts._replace(path=path))
+
+
+def _spellings(url):
+    """The ways one page's address may have been stored: as given, plain, percent-encoded, each with and without the
+    trailing slash (Ruud links the same product page both ways)."""
+    parts = urlsplit(url)
+    plain = unquote(parts.path)
+    forms = [url] + [urlunsplit(parts._replace(path=path))
+                     for path in (plain, quote(plain, safe="/:@!$&'()*+,;=-._~"))]
+    out = []
+    for form in forms:
+        out += [form, _other_slash(form)]
+    return [f for f in dict.fromkeys(out) if f is not None]
 
 
 def _other_slash(url):
@@ -241,14 +256,13 @@ class _StartCrawl:
     # ------------------------------------------------------------ links
 
     def _row(self, url, depth, parent_id, state="queued"):
-        """The page row for a link (its slash twin counts as the same page), made if new."""
-        for candidate in (url, _other_slash(url)):
-            if candidate is None:
-                continue
-            found = _rows(self.conn, "SELECT id, fetch_state, decision, decided_by, fetched_at IS NOT NULL, url FROM pages "
-                                     "WHERE brand_id = %s AND url_sha = %s", (self.brand_id, _sha(candidate)))
-            if found:
-                return found[0]
+        """The page row for a link, made if new. Its slash twin and its plain or encoded spelling count as the same page
+        (_spellings); of several stored, the one already fetched."""
+        found = _rows(self.conn, "SELECT id, fetch_state, decision, decided_by, fetched_at IS NOT NULL, url FROM pages "
+                                 "WHERE brand_id = %s AND url_sha = ANY (%s) ORDER BY fetched_at IS NULL, id",
+                      (self.brand_id, [_sha(c) for c in _spellings(url)]))
+        if found:
+            return found[0]
         host_id = self.fetcher._host_row(normalize_host(urlsplit(url).hostname or ""))["id"]
         return _rows(self.conn,
                      "INSERT INTO pages (brand_id, host_id, start_url_id, parent_id, url, url_sha, depth, fetch_state) "
@@ -262,11 +276,13 @@ class _StartCrawl:
               (from_id, to_id, text or None, self.fetcher.now()))
 
     def _set(self, row_id, fetched, decision, state=None):
-        """Store a decision. A page fetched before keeps fetch_state 'fetched'; the decision still rules future runs."""
+        """Store a decision. A page fetched before keeps fetch_state 'fetched'; the decision still rules future runs. A
+        failed page still to be crawled stays 'failed' (its retry wait is in next_check_at), so status counts it."""
         _rows(self.conn, "UPDATE pages SET decision = %s, decided_by = %s, decision_reason = %s"
-                         + ("" if fetched else ", fetch_state = %s") + " WHERE id = %s",
+                         + ("" if fetched else ", fetch_state = CASE WHEN fetch_state = 'failed' AND %s = 'queued' "
+                                               "THEN fetch_state ELSE %s END") + " WHERE id = %s",
               (("crawl" if decision.verdict == "crawl" else "skip"), decision.by, (decision.reason or "")[:500] or None,
-               *(() if fetched else (state,)), row_id))
+               *(() if fetched else (state, state)), row_id))
 
     def _child_kind(self, from_kind, url):
         if from_kind == "json" and not is_pdf_link(url) and self.prefix:

@@ -41,7 +41,9 @@ RECHECK_AFTER = timedelta(days=30)
 RETRY_FAILED_AFTER = timedelta(days=1)  # doubled for each failure in a row, up to RETRY_FAILED_MAX
 RETRY_FAILED_MAX = timedelta(days=30)
 MAX_URL_LENGTH = 2000
-READ_DEADLINE_SECONDS = 120
+READ_DEADLINE_SECONDS = 120  # a download's whole time, plus DOWNLOAD_SECONDS_PER_10MB of its size (download_seconds)
+DOWNLOAD_SECONDS_PER_10MB = 60
+DOWNLOAD_MAX_SECONDS = 900
 
 HTML_TYPES = ("text/html", "application/xhtml+xml")
 REDIRECTS = (301, 302, 303, 307, 308)
@@ -70,6 +72,22 @@ class _Refused(Exception):
 
 class _ConnError(Exception):
     pass
+
+
+class _TooSlow(_ConnError):
+    """The body took longer than download_seconds: the file's trouble, not a sign the host is down."""
+
+
+def _declared_size(headers):
+    value = (headers.get("content-length") or "").strip()
+    return int(value) if value.isdigit() else 0
+
+
+def download_seconds(size):
+    """The whole time a download of size bytes (declared, or read so far) may take: 2 minutes, plus 1 minute per 10 MB,
+    at most 15. One deadline for every file cut a 100 MB PDF on any server slower than 0.8 MB/s (2026-10-29)."""
+    extra = DOWNLOAD_SECONDS_PER_10MB * (size or 0) / (10 * 1024 * 1024)
+    return int(min(READ_DEADLINE_SECONDS + extra, DOWNLOAD_MAX_SECONDS))
 
 
 def _default_now():
@@ -293,14 +311,14 @@ class Fetcher:
                     body, too_big = None, False
                     if limit:
                         chunks, size = [], 0
-                        deadline = time.monotonic() + READ_DEADLINE_SECONDS
+                        started, declared = time.monotonic(), _declared_size(resp.headers)
                         for chunk in resp.iter_bytes():
                             size += len(chunk)
                             if size > limit:
                                 too_big = True
                                 break
-                            if time.monotonic() > deadline:
-                                raise _ConnError("too slow")
+                            if time.monotonic() - started > download_seconds(max(declared, size)):
+                                raise _TooSlow("too slow")
                             chunks.append(chunk)
                         if not too_big:
                             body = b"".join(chunks)
@@ -417,6 +435,8 @@ class Fetcher:
             raw = self._get(host_id, target, {"Accept": "application/json"}, _json_body_limit)
         except _Refused as refused:
             return Result("refused", refused.reason, url=url)
+        except _TooSlow:
+            return Result("failed", "too_slow", url=url)
         except _ConnError:
             if host_id is not None:
                 self._host_failed(host_id)
@@ -497,6 +517,8 @@ class Fetcher:
                     raw = self._get(host_id, target, conditional, limit)
             except _Refused as refused:
                 return Result("refused", refused.reason, url=current)
+            except _TooSlow:
+                return failed("too_slow")
             except _ConnError:
                 return failed("network", host_failure=True)
 

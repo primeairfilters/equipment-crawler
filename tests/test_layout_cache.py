@@ -72,3 +72,21 @@ def test_a_damaged_kept_answer_is_read_again(tmp_path, monkeypatch):
     for path in tmp_path.joinpath(".layout").iterdir():
         path.write_text("{not json")
     assert crawler.textextract.extract_layout(PDF) == first
+
+
+def test_a_pdf_read_whole_under_a_lower_page_limit_is_not_read_again_under_a_higher_one(tmp_path, monkeypatch):
+    # 2026-10-29: the limit went from 200 to 300 pages; the 596 kept layouts of shorter PDFs are still whole
+    import crawler.textextract
+    monkeypatch.setenv("DOCS_DIR", str(tmp_path))
+    two = make_pdf([["Page one of the manual"], ["Page two of the manual"]])
+    first = crawler.textextract.extract_layout(two, max_pages=5)
+    monkeypatch.setattr(crawler.textextract, "_run_child", no_reader)
+    assert crawler.textextract.extract_layout(two, max_pages=9) == first
+
+
+def test_a_pdf_cut_at_a_lower_page_limit_is_read_again_under_a_higher_one(tmp_path, monkeypatch):
+    import crawler.textextract
+    monkeypatch.setenv("DOCS_DIR", str(tmp_path))
+    three = make_pdf([["Page one of the manual"], ["Page two of the manual"], ["Page three of the manual"]])
+    assert len(crawler.textextract.extract_layout(three, max_pages=2)) == 2
+    assert len(crawler.textextract.extract_layout(three, max_pages=9)) == 3

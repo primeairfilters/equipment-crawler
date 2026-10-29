@@ -69,7 +69,8 @@ def test_a_pdf_with_a_text_layer_never_starts_ocr(monkeypatch):
         raise AssertionError("OCR started on a page that has text")
 
     monkeypatch.setattr(crawler.textextract, "_ocr_child", no_ocr)
-    found = crawler.textextract.extract_pdf(make_pdf([["Installation Manual", "Read all instructions first."]]))
+    found = crawler.textextract.extract_pdf(make_pdf([["Installation Manual",
+                                                      "Read all instructions first and keep this manual near the unit."]]))
     assert found.ocr_pages == set() and "Read all instructions" in found.pages[0]
 
 
@@ -208,7 +209,7 @@ def test_a_warning_icon_read_as_letters_before_a_caption_is_no_heading(junk):
                                   "Thank you very much for purchasing this Heat Pump Air Conditioner",
                                   "Conditional Conditional Conditional", "Number Tool Number Tool Number Tool",
                                   "Once connected, prod-", "50mm Approx", "/ Nut", "—Fiberglass Insulation",
-                                  "& Sleep 4 indicator"])
+                                  "& Sleep 4 indicator", "KEN", "Ok OK"])
 def test_diagram_labels_and_big_font_sentences_read_with_ocr_are_no_headings(junk):
     paths = headings_of("Refrigerant Charging", junk)
     assert not any(junk in p for p in paths) and any("Refrigerant Charging" in p for p in paths)
@@ -222,7 +223,8 @@ def test_an_ocr_line_tesseract_is_unsure_of_is_no_heading():
 
 
 @pytest.mark.parametrize("title", ["4.1 Pipe Material", "(1) Pipe cutting", "Caution Statements", "E. ELECTRICAL",
-                                   "Installing the water heater", "Precautions for using R454B refrigerant"])
+                                   "Installing the water heater", "Precautions for using R454B refrigerant",
+                                   "E36 Error", "FAN Mode"])
 def test_real_ocr_headings_stay_headings(title):
     assert any(title in p for p in headings_of("Refrigerant Charging", title))
 
@@ -266,7 +268,25 @@ def test_a_drawing_page_with_only_a_caption_is_read_with_ocr_and_keeps_its_capti
     assert any(i.get("ocr") and "subcooling" in i["text"] for i in items)
 
 
-@pytest.mark.parametrize("caption", ["Notes", "37", "Intentionally left blank", "ESPAÑOL", "FRANÇAIS 17", "Page 4"])
+@pytest.mark.parametrize("caption", ["OPERATION Remote Control 42", "TROUBLESHOOTING Error Code 13 Error Code 8 79",
+                                     "WIRING DIAGRAMS 115v Indoor Unit FAHSW091AC, FAHSW12A1C Figure 801 110"])
+def test_a_drawing_page_with_only_a_running_header_and_a_short_caption_is_read_with_ocr(caption):
+    # 2026-10-29: Floating Air manuals (docs 72, 73) print the remote control, error-code and wiring pages as pictures
+    # under a header like "OPERATION Remote Control 42"; three words or more counted as a text page, so OCR never ran
+    from crawler.textextract import extract_pdf
+    pdf = caption_over_picture(caption, picture_pdf(picture_page("", BODY)))
+    found = extract_pdf(pdf)
+    assert "subcooling" in found.pages[0] and found.ocr_pages == {0}
+
+
+def test_a_page_of_real_text_is_not_a_caption():
+    from crawler.textextract import caption_only
+    assert not caption_only("Remove the battery cover and insert two new AAA batteries before use.")
+    assert caption_only("OPERATION Remote Control 42")
+
+
+@pytest.mark.parametrize("caption", ["Notes", "37", "Intentionally left blank", "ESPAÑOL", "FRANÇAIS 17", "Page 4",
+                                     "Notes and service history 55"])
 def test_a_notes_blank_number_or_language_page_is_not_read_with_ocr(caption, monkeypatch):
     import crawler.textextract
 

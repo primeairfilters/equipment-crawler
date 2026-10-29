@@ -160,13 +160,16 @@ def text_headings(*titles):
 
 @pytest.mark.parametrize("junk", ["! WARNING", "! DANGER!", "! CAUTION", "! NOTICE", "⚠ WARNING",
                                   "! DANGER: Hotter water increases the", "]AGL-AGN-AHM MODELS)*([ 9.0",
-                                  "> Return to Table of Contents EcoNet® Smart Thermostat User Guide 10"])
+                                  "> Return to Table of Contents EcoNet® Smart Thermostat User Guide 10",
+                                  "Iii:}", "lIl", "Iii"])
 def test_an_icon_caption_or_a_mirrored_or_navigation_line_is_no_heading(junk):
+    # "Iii:}": an icon font in doc 800 (p.118, 27.6 pt) became the top heading of 136 sections (2026-10-29)
     paths = text_headings("Refrigerant Charging", junk)
     assert not any(junk in p for p in paths) and any("Refrigerant Charging" in p for p in paths)
 
 
-@pytest.mark.parametrize("title", ["Caution Statements", "(1) Pipe cutting", "4.1 Pipe Material", "Wiring Diagram"])
+@pytest.mark.parametrize("title", ["Caution Statements", "(1) Pipe cutting", "4.1 Pipe Material", "Wiring Diagram",
+                                   "III. Installation", "Fill"])
 def test_ordinary_headings_stay(title):
     assert any(title in p for p in text_headings("Refrigerant Charging", title))
 
@@ -532,3 +535,24 @@ def test_the_form_number_rule_makes_a_chain_when_the_newest_is_tagged_before_the
     tag_with_form(runtime_conn, newest)
     tag_with_form(runtime_conn, middle)
     assert replaces(runtime_conn, oldest, middle, newest) == [None, oldest, middle]
+
+
+# ---------------------------------------------------------------- slow downloads (2026-10-29)
+
+def test_the_time_allowed_for_a_download_grows_with_its_size():
+    # one deadline for every file (120 s) cut a 100 MB PDF on any server slower than 0.8 MB/s
+    from crawler.fetch import download_seconds
+    mb = 1024 * 1024
+    assert [download_seconds(n) for n in (None, 0, 10 * mb, 100 * mb, 1024 * mb)] == [120, 120, 180, 720, 900]
+
+
+def test_a_download_past_its_deadline_fails_as_too_slow_and_does_not_rest_the_host(ruud, monkeypatch):
+    # a slow file was a 'network' failure counted against its host: five rested the whole host for 24 hours
+    import itertools
+    import crawler.fetch
+    ticks = itertools.count(0, 1000)
+    monkeypatch.setattr(crawler.fetch.time, "monotonic", lambda: next(ticks))
+    ruud.site.route("/manual.pdf", PDF_BYTES * 2000, headers={"Content-Type": "application/pdf"})
+    get(ruud, "/manual.pdf")
+    assert page_failure(ruud, "/manual.pdf")[:2] == ("failed", "too_slow")
+    assert ruud.one("SELECT failure_count FROM hosts WHERE host = 'ruud.test'")[0][0] == 0

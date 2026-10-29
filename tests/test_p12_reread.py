@@ -84,3 +84,31 @@ def test_a_document_needing_ocr_is_read_again_so_a_better_reader_can_recover_pag
     monkeypatch.setattr(crawler.textextract, "extract_pdf", real)
     assert reread(world.conn) == {"read": 1, "unreadable": 0}
     assert document(world, sha) == ((2, 2, False),)
+
+
+def test_a_document_cut_at_an_old_page_limit_is_read_whole_when_named(world):
+    # 2026-10-29: the page limit went from 200 to 300; docs 799, 800 and 604 were stored cut at 200
+    import crawler.textextract
+    from crawler.documents import reread
+    defaults = crawler.textextract.extract_pdf.__defaults__
+    crawler.textextract.extract_pdf.__defaults__ = (1,) + defaults[1:]  # stored cut at one page
+    start(world)
+    serve(world, "/start", "/big.pdf")
+    body = make_pdf([["Service manual for RA15AZ24AJ3CA", "Charging the system"], ["Wiring diagram page two"]])
+    serve_pdf(world, "/big.pdf", body)
+    try:
+        crawl(world)
+    finally:
+        crawler.textextract.extract_pdf.__defaults__ = defaults
+    sha = hashlib.sha256(body).hexdigest()
+    assert document(world, sha) == ((1, 1, False),)
+    assert reread(world.conn) == {"read": 0, "unreadable": 0}  # nothing marks it as cut
+    doc = world.one("SELECT id FROM documents WHERE content_sha = %s", (sha,))[0][0]
+    assert reread(world.conn, documents=[doc]) == {"read": 1, "unreadable": 0}
+    assert document(world, sha) == ((2, 2, False),)
+
+
+def test_the_reread_command_takes_documents_by_id():
+    from crawler.__main__ import build_parser
+    args = build_parser().parse_args(["reread", "--document", "799", "--document", "800"])
+    assert args.document == [799, 800]

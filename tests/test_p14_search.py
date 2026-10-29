@@ -3,6 +3,7 @@ manufacturer, then everything; search by meaning (vectors), by words (full text)
 merged by reciprocal rank; widen one level when the narrowed search finds too little. A fake embedder, no network."""
 import json
 import math
+import os
 import re
 from decimal import Decimal
 
@@ -179,6 +180,42 @@ def test_the_ask_and_eval_commands_print_their_results(runtime_conn, library, tm
     code, out, err = cli(runtime_conn, "eval", str(path))
     assert code == 0, err
     assert "top 5: 1 of 1" in out
+
+
+def test_eval_keeps_each_questions_rank_and_shows_what_moved_since_the_last_run(runtime_conn, library, tmp_path,
+                                                                               monkeypatch):
+    # 2026-10-28: after Ruud batch 6 the score fell 17 -> 16 and finding which question fell took digging
+    import crawler.embed
+    from test_p11_cli import cli
+    monkeypatch.setattr(crawler.embed, "OpenAIEmbedder", BagEmbedder)
+    sha = q(runtime_conn, "SELECT content_sha FROM documents WHERE id = %s", (library["model"],))[0][0]
+    path = tmp_path / "eval.json"
+    case = {"question": "what does E4 mean", "expect": [{"document": sha[:12], "pages": [1, 1]}]}
+    path.write_text(json.dumps([case]))
+    code, out, err = cli(runtime_conn, "eval", str(path))
+    assert code == 0, err
+    # kept in the document library: the repo is mounted read-only in the container
+    kept = os.path.join(os.environ["DOCS_DIR"], ".eval", "eval.last.json")
+    assert "first run" in out and json.loads(open(kept).read()) == {"what does E4 mean": 1}
+    code, out, err = cli(runtime_conn, "eval", str(path))
+    assert "no question moved since the last run" in out
+    path.write_text(json.dumps([dict(case, expect=[{"document": sha[:12], "pages": [9, 9]}])]))
+    code, out, err = cli(runtime_conn, "eval", str(path))
+    assert "moved since the last run:" in out and "#1 -> missed  what does E4 mean" in out
+
+
+def test_eval_still_prints_its_score_when_the_ranks_cannot_be_kept(runtime_conn, library, tmp_path, monkeypatch):
+    import crawler.embed
+    from test_p11_cli import cli
+    monkeypatch.setattr(crawler.embed, "OpenAIEmbedder", BagEmbedder)
+    monkeypatch.setenv("DOCS_DIR", str(tmp_path / "missing" / "library"))
+    (tmp_path / "missing").write_text("a file where the folder should be")
+    sha = q(runtime_conn, "SELECT content_sha FROM documents WHERE id = %s", (library["model"],))[0][0]
+    path = tmp_path / "eval.json"
+    path.write_text(json.dumps([{"question": "what does E4 mean", "expect": [{"document": sha[:12], "pages": [1, 1]}]}]))
+    code, out, err = cli(runtime_conn, "eval", str(path))
+    assert code == 0, err
+    assert "top 5: 1 of 1" in out and "could not keep" in out
 
 
 # ---------------------------------------------------------------- tuning: language preference

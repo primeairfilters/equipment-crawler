@@ -13,9 +13,9 @@ from pathlib import Path
 
 from selectolax.lexbor import LexborHTMLParser
 
-PDF_MAX_PAGES = 200
+PDF_MAX_PAGES = 300  # 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604 (251, 255, 221 pages)
 PDF_TIMEOUT_SECONDS = 180  # big Ruud manuals took 63-109 s to read (text, tables, drawn-text check); 60 s cut them off
-LAYOUT_TIMEOUT_SECONDS = 180  # text and layout of up to 200 pages in one pass
+LAYOUT_TIMEOUT_SECONDS = 180  # the floor; kb.read_original allows more per page
 PDF_MEMORY_BYTES = 1024 ** 3
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
 DRAWN_TEXT_SHARE = 0.2  # this share of a PDF's text lines drawn as shapes: its text layer is fragments, treat as a scan
@@ -23,6 +23,7 @@ DRAWN_TEXT_MIN_LINES = 5
 OCR_VERSION = "3"  # results are kept in the library under this version; a new reader gets a new key (2: column order, 3: confidence)
 OCR_SECONDS_BASE = 30
 OCR_SECONDS_PER_PAGE = 20  # Tesseract at 300 dpi takes 2-5 s a page; the rest is headroom
+OCR_ADD_CONFIDENCE = 70  # an OCR line added to a page that has a caption or header (_added)
 
 _LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                             "ﬅ": "st", "ﬆ": "st", " ": " "})
@@ -137,10 +138,9 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
     read = ocr_pages(data, wanted, memory, strict=True)
     for n, lines in read.items():
         lines = [dict(line, text=clean(line["text"]).strip("| ")) for line in lines]  # a ruling beside a line reads as "|"
-        caption = {_squash(i["text"]) for i in pages[n]}
         pages[n] = pages[n] + [{"kind": "text", "text": line["text"], "size": float(line.get("size") or 0),
                                 "bold": False, "ocr": True, "confidence": line.get("confidence", 100)}
-                               for line in lines if line["text"] and _squash(line["text"]) not in caption]
+                               for line in _added(lines, [i["text"] for i in pages[n]])]
     return pages
 
 
@@ -163,15 +163,23 @@ def _layout_path(data):
 
 
 def _kept_layout(data, max_pages):
-    """The kept answer for this PDF, or None (none kept, another reader or page limit, or the file is damaged)."""
+    """The kept answer for this PDF, or None (none kept, another reader, cut at another page limit, or the file is
+    damaged). A PDF read whole (fewer pages than the limit it was read under) serves any limit: extract_layout cuts."""
     path = _layout_path(data)
     try:
         saved = json.loads(path.read_text()) if path else None
     except (OSError, ValueError):
         return None
-    if not isinstance(saved, dict) or saved.get("reader") != _layout_reader() or saved.get("max_pages") != max_pages:
+    if not isinstance(saved, dict) or saved.get("reader") != _layout_reader():
         return None
-    return saved.get("raw")
+    raw, limit = saved.get("raw"), saved.get("max_pages")
+    if limit == max_pages:
+        return raw
+    try:
+        whole = len(raw["layout"]) < limit
+    except (KeyError, TypeError):
+        return None
+    return raw if whole else None
 
 
 def _keep_layout(data, max_pages, raw):
@@ -202,8 +210,7 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
     read = ocr_pages(data, [n for n, text in enumerate(pages) if not text or caption_only(text)], memory)
     for n, lines in read.items():
-        caption = {_squash(line) for line in pages[n].splitlines()}
-        pages[n] = clean("\n".join([pages[n]] + [line["text"] for line in lines if _squash(line["text"]) not in caption]))
+        pages[n] = clean("\n".join([pages[n]] + [line["text"] for line in _added(lines, pages[n].splitlines())]))
     return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read))
 
 
@@ -251,6 +258,22 @@ def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
         if lines and _language(" ".join(line["text"] for line in lines)) not in ("es", "fr"):
             out[n] = lines
     return out
+
+
+def _added(lines, layer):
+    """The OCR lines that add to a page's text layer (its caption or header). On a page with no text layer, every line.
+    On a page with one, a line must bring a word the layer does not have (OCR re-reads the caption, sometimes in another
+    order) and be read with OCR_ADD_CONFIDENCE: sideways or stylized caption text comes back as garble ("spsemdn dull",
+    53-60), real text in a picture reads 75 and up."""
+    layer = [line for line in layer if line.strip()]
+    if not layer:
+        return [line for line in lines if line["text"]]
+    caption = {_squash(line) for line in layer}
+    words = {w.lower() for line in layer for w in _WORD.findall(line)}
+    return [line for line in lines
+            if line["text"] and _squash(line["text"]) not in caption
+            and line.get("confidence", 100) >= OCR_ADD_CONFIDENCE
+            and any(w.lower() not in words for w in _WORD.findall(line["text"]))]
 
 
 def _ocr_child(data, indexes, memory):
@@ -333,11 +356,15 @@ _NOT_A_CAPTION = re.compile(r"(notes?|memo|page|espa[ñn]ol|fran[çc]ais|english
                             re.I)
 
 
+CAPTION_MAX_WORDS = 8  # a running header and a short caption ("OPERATION Remote Control 42"); a page of text has more
+
+
 def caption_only(text):
-    """A page whose text layer is only a caption over a drawing ("9. WIRING DIAGRAM", "3. UNIT DIMENSION"): under
-    three real words, one of them 4+ letters, and not a Notes or blank page, a page number or a language header, nor
-    Arabic (user, 2026-10-28: OCR those, not the others)."""
-    if not text or has_text(text) or re.search(r"[\u0600-\u06FF]", text):
+    """A page whose text layer is only a caption over a drawing ("9. WIRING DIAGRAM", "3. UNIT DIMENSION", "OPERATION
+    Remote Control 42"): at most CAPTION_MAX_WORDS real words, one of them 4+ letters, and not a Notes or blank page, a
+    page number or a language header, nor Arabic (user, 2026-10-28: OCR those, not the others; 2026-10-29: up to 8
+    words, as the Floating Air manuals print their remote control and error-code pages as pictures under a header)."""
+    if not text or len(_WORD.findall(text)) > CAPTION_MAX_WORDS or re.search(r"[\u0600-\u06FF]", text):
         return False
     words = " ".join(re.findall(r"[^\W\d_]+", text))
     return bool(re.search(r"[^\W\d_]{4,}", words)) and not _NOT_A_CAPTION.match(words)

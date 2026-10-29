@@ -116,10 +116,15 @@ def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, mo
             "INSERT INTO documents (content_sha, manufacturer_id, title, canonical_url, doc_type, tagged_by, tagger_version, "
             "trade, equipment_type, language, form_number, state) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'tagged') ON CONFLICT (content_sha) DO UPDATE SET "
-            "title = COALESCE(EXCLUDED.title, documents.title), doc_type = COALESCE(EXCLUDED.doc_type, documents.doc_type), "
+            "title = COALESCE(EXCLUDED.title, documents.title), "
+            # a tag the user set by hand (kb.set_tags) is never overwritten
+            "doc_type = CASE WHEN 'doc_type' = ANY (documents.user_tags) THEN documents.doc_type "
+            "ELSE COALESCE(EXCLUDED.doc_type, documents.doc_type) END, "
             "manufacturer_id = COALESCE(documents.manufacturer_id, EXCLUDED.manufacturer_id), "
-            "trade = COALESCE(EXCLUDED.trade, documents.trade), "
-            "equipment_type = COALESCE(EXCLUDED.equipment_type, documents.equipment_type), "
+            "trade = CASE WHEN 'trade' = ANY (documents.user_tags) THEN documents.trade "
+            "ELSE COALESCE(EXCLUDED.trade, documents.trade) END, "
+            "equipment_type = CASE WHEN 'equipment_type' = ANY (documents.user_tags) THEN documents.equipment_type "
+            "ELSE COALESCE(EXCLUDED.equipment_type, documents.equipment_type) END, "
             "language = COALESCE(EXCLUDED.language, documents.language), "
             "form_number = COALESCE(EXCLUDED.form_number, documents.form_number), "
             "tagged_by = EXCLUDED.tagged_by, tagger_version = COALESCE(EXCLUDED.tagger_version, documents.tagger_version), "
@@ -128,17 +133,16 @@ def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, mo
             (content_sha, manufacturer_id, title, source_url, doc_type, extracted_by, tagger_version,
              tags.get("trade"), tags.get("equipment_type"), tags.get("language"), tags.get("form_number")))
         if tags.get("form_number"):
-            # this document and any newer one with the same form: a newer one tagged first found nothing to replace, or
-            # an older version than this one (59 <- 1074 <- 1079, not both on 59)
-            conn_exec(conn, "UPDATE documents d SET replaces_id = (SELECT o.id FROM documents o WHERE o.manufacturer_id = "
-                            "d.manufacturer_id AND o.form_number = d.form_number AND o.language IS NOT DISTINCT FROM "
-                            "d.language AND o.id <> d.id AND o.created_at <= d.created_at AND o.id < d.id "
-                            "ORDER BY o.id DESC LIMIT 1) FROM documents t WHERE t.id = %s AND d.id >= t.id "
-                            "AND d.manufacturer_id = t.manufacturer_id AND d.form_number = t.form_number "
-                            "AND d.language IS NOT DISTINCT FROM t.language AND (d.replaces_id IS NULL OR (d.id > t.id "
-                            "AND d.replaces_id < t.id AND EXISTS (SELECT 1 FROM documents r WHERE r.id = d.replaces_id "
-                            "AND r.manufacturer_id = t.manufacturer_id AND r.form_number = t.form_number "
-                            "AND r.language IS NOT DISTINCT FROM t.language)))",
+            # each version of this form (same base without its "Rev" mark, migration 0008) points at the one before it
+            # by revision, then by id: tagged in any order (59 <- 1074 <- 1079; doc 840, the older revision of 50, was
+            # found after it). A link to a document outside the form (the same address's earlier PDF) is kept.
+            conn_exec(conn, "UPDATE documents d SET replaces_id = g.prev FROM (SELECT o.id, lag(o.id) OVER "
+                            "(ORDER BY o.form_rev, o.id) AS prev FROM documents o JOIN documents t ON t.id = %s "
+                            "AND o.manufacturer_id = t.manufacturer_id AND o.form_base = t.form_base "
+                            "AND o.language IS NOT DISTINCT FROM t.language) g WHERE d.id = g.id "
+                            "AND d.replaces_id IS DISTINCT FROM g.prev AND (d.replaces_id IS NULL OR EXISTS "
+                            "(SELECT 1 FROM documents r WHERE r.id = d.replaces_id AND r.manufacturer_id = d.manufacturer_id "
+                            "AND r.form_base = d.form_base AND r.language IS NOT DISTINCT FROM d.language))",
                       (document_id,))
         # sections already built keep true copies of the tags; a manual retagged as not equipment leaves Breeze at once
         conn_exec(conn, "UPDATE sections s SET manufacturer_id = d.manufacturer_id, trade = d.trade, "

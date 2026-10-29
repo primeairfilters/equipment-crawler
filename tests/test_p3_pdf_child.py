@@ -38,12 +38,12 @@ def test_the_pdf_child_gets_none_of_the_parents_secrets(monkeypatch):
     out = textextract.extract_pdf(make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2"]]))
 
     assert out.pages and "RA15AZ24AJ3CA" in out.pages[0]  # the real child ran, so what we saw was really passed to it
-    assert len(seen) == 1 and isinstance(seen[0], dict)    # an explicit environment, not "inherit everything"
-    env = seen[0]
-    for key, value in SECRETS.items():
-        assert key not in env
-        assert value not in env.values()
-    assert not [k for k in env if k.startswith(("EQ_", "ANTHROPIC", "OPENAI", "AWS_"))]
+    assert seen and all(isinstance(env, dict) for env in seen)  # an explicit environment, not "inherit everything"
+    for env in seen:  # the reader, and the OCR child on a page this short
+        for key, value in SECRETS.items():
+            assert key not in env
+            assert value not in env.values()
+        assert not [k for k in env if k.startswith(("EQ_", "ANTHROPIC", "OPENAI", "AWS_"))]
 
 
 def run_child(monkeypatch, page_text, closed=None):

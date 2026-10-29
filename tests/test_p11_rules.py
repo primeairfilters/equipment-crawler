@@ -51,6 +51,19 @@ def test_a_pdf_is_always_crawled_even_under_a_skip_keyword():
     assert d.verdict == "crawl" and d.by == "rule"
 
 
+@pytest.mark.parametrize("url", [
+    "https://media.ruud.com/wp-content/uploads/sites/2/2023/12/RuPROF_Ultra_75Gal_LeftFacing_LoRes.jpg",
+    "https://media.ruud.com/wp-content/uploads/sites/2/2023/07/Ruud_TritonLD_CommGasWH_50Gal_CoffeeShop_LoRes.PNG",
+    "https://media.ruud.com/site/ruuddotcom/_WP/downloads/CertiSpec3Setup.exe",
+    U + "/products/specs/video/install-walkthrough.mp4?v=2",
+])
+def test_an_image_video_or_installer_link_is_skipped_before_it_is_fetched(url):
+    # Ruud batch 6: 20 of 49 failures were .jpg/.png/.exe links fetched, refused as bad_content_type and retried
+    d = decide(url, "Specifications", keywords=[kw("products", "prefer")])
+    assert (d.verdict, d.state, d.by) == ("skip", "skipped_rule", "rule")
+    assert "not a document" in d.reason
+
+
 def test_a_skip_keyword_skips_with_the_keyword_as_the_reason():
     d = decide(U + "/blog/post", "Specifications", keywords=[kw("blog")])
     assert (d.verdict, d.state, d.by) == ("skip", "skipped_keyword", "rule")

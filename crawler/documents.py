@@ -51,9 +51,10 @@ def record_pdf(conn, brand_id, page_id, url, body):
     return document_id
 
 
-def reread(conn, brand_id=None, after_document=None):
+def reread(conn, brand_id=None, after_document=None, documents=None):
     """Read again every kept PDF whose document has no pages (the reader failed on it, e.g. a big manual before the
     reader closed pages as it went) or needs OCR (a better reader may recover pages; a true scan comes out the same).
+    documents: read exactly these instead (a manual cut at an older page limit: nothing stored says it was cut).
     Fetches nothing. Each address that served it gets the page text; the document gets
     its page count and OCR flag. Returns {"read": n, "unreadable": n}."""
     from crawler.textextract import ExtractError, extract_pdf, index_page
@@ -61,8 +62,10 @@ def reread(conn, brand_id=None, after_document=None):
     if not library.configured():
         return {"read": 0, "unreadable": 0}
     docs = _rows(conn, "SELECT DISTINCT d.id, d.content_sha FROM documents d JOIN document_urls du ON du.document_id = d.id "
-                       "JOIN pages p ON p.id = du.page_id WHERE (d.page_count = 0 OR d.needs_ocr) AND (%s::bigint IS NULL OR p.brand_id = %s) "
-                       "ORDER BY d.id", (brand_id, brand_id))
+                       "JOIN pages p ON p.id = du.page_id WHERE (CASE WHEN %s::bigint[] IS NULL "
+                       "THEN d.page_count = 0 OR d.needs_ocr ELSE d.id = ANY (%s::bigint[]) END) "
+                       "AND (%s::bigint IS NULL OR p.brand_id = %s) ORDER BY d.id",
+                 (documents, documents, brand_id, brand_id))
     read = unreadable = 0
     for document_id, sha in docs:
         if not library.has_file(sha):

@@ -14,6 +14,7 @@ Nothing here deletes a row. Callers commit.
 """
 import hashlib
 import os
+import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -177,7 +178,15 @@ def blocked(conn, document_id, lock=False):
         return "the document is not tagged yet"
     if doc_type == "not_equipment":
         return "the document is not about equipment"
+    if _rows(conn, "SELECT 1 FROM documents d JOIN documents w ON " + _SAME_FORM + " AND w.state = 'live' "
+                   "AND (w.form_rev, w.id) > (d.form_rev, d.id) WHERE d.id = %s LIMIT 1", (document_id,)):
+        return "a newer revision of its form is live"
     return None
+
+
+# another version of d's form (migration 0008): same manufacturer, form base and language
+_SAME_FORM = ("w.id <> d.id AND w.manufacturer_id = d.manufacturer_id AND w.form_base = d.form_base "
+              "AND w.language IS NOT DISTINCT FROM d.language")
 
 
 def publish(conn, document_id, build=None):
@@ -197,7 +206,11 @@ def publish(conn, document_id, build=None):
         _exec(conn, "UPDATE documents SET live_build = %s, state = 'live', updated_at = (now() AT TIME ZONE 'UTC') "
                     "WHERE id = %s", (build, document_id))
         old = _rows(conn, "SELECT replaces_id FROM documents WHERE id = %s", (document_id,))[0][0]
-        if old is not None:
+        # the version it replaces, and every lower revision of its form still live (one found after it, doc 840)
+        retire = {old} - {None} | {r[0] for r in _rows(
+            conn, "SELECT w.id FROM documents d JOIN documents w ON " + _SAME_FORM + " AND w.state = 'live' "
+                  "AND (w.form_rev, w.id) < (d.form_rev, d.id) WHERE d.id = %s", (document_id,))}
+        for old in sorted(retire):
             _exec(conn, "UPDATE sections SET is_live = false WHERE document_id = %s AND is_live", (old,))
             _exec(conn, "UPDATE documents SET state = 'retired', updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s", (old,))
     except Exception:
@@ -332,7 +345,71 @@ def unhide(conn, target_type, target, *, reason, by_whom):
     return target_id
 
 
+# ---------------------------------------------------------------- tags set by hand
+
+def set_tags(conn, document_id, *, doc_type=None, equipment_type=None, trade=None):
+    """Set a document's tags by hand (`./crawl tag`): the AI tags from the first pages and gets some wrong (doc 800, a
+    255-page manual, as spec_sheet). Only values the AI may use. The live sections take the tags at once (their vectors
+    follow by trigger), and the fields are kept in user_tags, so the AI tagging the document again leaves them alone.
+    Tagged not_equipment, the manual leaves Breeze; tagged back, its live build returns (as unhide). Returns the
+    fields set."""
+    from crawler.extract import DOC_TYPES, EQUIPMENT_TYPES, TRADES  # extract imports kb
+    wanted = {"doc_type": (doc_type, DOC_TYPES), "equipment_type": (equipment_type, EQUIPMENT_TYPES),
+              "trade": (trade, TRADES)}
+    values = {field: value for field, (value, allowed) in wanted.items() if value is not None}
+    if not values:
+        raise ValueError("nothing to set: give a doc_type, an equipment_type or a trade")
+    for field, value in values.items():
+        if value not in wanted[field][1]:
+            raise ValueError(f"{field} {value!r} is not one of: {', '.join(wanted[field][1])}")
+    found = _rows(conn, "SELECT doc_type FROM documents WHERE id = %s FOR UPDATE", (document_id,))
+    if not found:
+        raise UnknownTarget(f"No document with id {document_id}.")
+    was_off = found[0][0] == "not_equipment"
+    sets = ", ".join(f"{field} = %s" for field in values)
+    _exec(conn, f"UPDATE documents SET {sets}, user_tags = ARRAY(SELECT DISTINCT unnest(user_tags || %s::text[]) "
+                f"ORDER BY 1), updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s",
+          (*values.values(), list(values), document_id))
+    _exec(conn, "UPDATE sections s SET trade = d.trade, equipment_type = d.equipment_type, doc_type = d.doc_type, "
+                "is_live = s.is_live AND d.doc_type IS DISTINCT FROM 'not_equipment' FROM documents d "
+                "WHERE d.id = %s AND s.document_id = d.id", (document_id,))
+    if was_off and values.get("doc_type", "not_equipment") != "not_equipment":
+        live = _rows(conn, "SELECT live_build FROM documents WHERE id = %s AND state = 'live'", (document_id,))
+        if live and live[0][0] is not None and blocked(conn, document_id, lock=True) is None:
+            _exec(conn, "UPDATE sections SET is_live = true WHERE document_id = %s AND build = %s",
+                  (document_id, live[0][0]))
+    return values
+
+
+def not_duplicates(conn, one, two, *, reason, by_whom="user"):
+    """Mark two manuals as different products (`./crawl not-duplicates`), so `check` stops listing them."""
+    first, second = sorted((int(one), int(two)))
+    if first == second:
+        raise ValueError("give two different manuals")
+    if len(_rows(conn, "SELECT id FROM documents WHERE id IN (%s, %s)", (first, second))) < 2:
+        raise UnknownTarget(f"No manual with id {first} or {second}.")
+    _exec(conn, "INSERT INTO not_duplicates (first_id, second_id, reason, decided_by) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (first_id, second_id) DO UPDATE SET reason = EXCLUDED.reason, "
+                "decided_by = EXCLUDED.decided_by, decided_at = (now() AT TIME ZONE 'UTC')",
+          (first, second, reason, by_whom))
+    return first, second
+
+
 # ---------------------------------------------------------------- check
+
+DUPLICATE_OVERLAP = 0.6  # Ruud 2026-10-29: real pairs share 0.64-0.99 of their text, a shared generic title 0.29-0.52
+
+
+def _shared_text(conn, one, two):
+    """The share of the shorter manual's 5-word runs found in the other (live sections): a newer edition rewords a little
+    and keeps most, two products under one generic title ("USE AND INSTALLATION INSTRUCTIONS") share about half."""
+    runs = []
+    for document_id in (one, two):
+        text = " ".join(r[0] for r in _rows(conn, "SELECT body FROM sections WHERE document_id = %s AND is_live",
+                                             (document_id,)))
+        words = re.findall(r"[a-z0-9]+", text.lower())
+        runs.append({" ".join(words[i:i + 5]) for i in range(len(words) - 4)})
+    return len(runs[0] & runs[1]) / max(min(len(runs[0]), len(runs[1])), 1)
 
 def check(conn):
     """Read only. Problems (document ids) and counts of live documents and sections per manufacturer and trade."""
@@ -349,11 +426,16 @@ def check(conn):
                   "WHERE s.is_live AND (d.state <> 'live' OR s.build IS DISTINCT FROM d.live_build) ORDER BY 1")],
         "likely_duplicates": [tuple(r) for r in _rows(
             conn, "SELECT a.id, b.id FROM documents a JOIN documents b ON b.manufacturer_id = a.manufacturer_id "
-                  "AND b.title = a.title AND b.id > a.id WHERE a.state = 'live' AND b.state = 'live' AND "
+                  "AND b.title = a.title AND b.id > a.id WHERE a.state = 'live' AND b.state = 'live' AND NOT EXISTS "
+                  "(SELECT 1 FROM not_duplicates n WHERE n.first_id = a.id AND n.second_id = b.id) AND "
                   "(SELECT array_agg(model_key ORDER BY model_key) FROM document_models WHERE document_id = a.id) IS NOT DISTINCT "
                   "FROM (SELECT array_agg(model_key ORDER BY model_key) FROM document_models WHERE document_id = b.id) "
-                  "ORDER BY 1, 2")],
+                  "ORDER BY 1, 2") if _shared_text(conn, *r) >= DUPLICATE_OVERLAP],
+        "marked_different": _rows(conn, "SELECT COUNT(*) FROM not_duplicates")[0][0],
         "needs_ocr": _rows(conn, "SELECT COUNT(*) FROM documents WHERE needs_ocr")[0][0],
+        "user_tags": [(r[0], {field: r[1][field] for field in r[2]}) for r in _rows(  # set by hand: easy to review
+            conn, "SELECT id, json_build_object('doc_type', doc_type, 'equipment_type', equipment_type, 'trade', trade), "
+                  "user_tags FROM documents WHERE user_tags <> '{}' ORDER BY id")],
         "live_without_vectors": _rows(  # P13: Breeze's meaning search cannot find these yet (text search can)
             conn, "SELECT COUNT(*) FROM sections s WHERE s.is_live AND NOT EXISTS "
                   "(SELECT 1 FROM section_vectors_te3s_1536 v WHERE v.section_id = s.id)")[0][0],

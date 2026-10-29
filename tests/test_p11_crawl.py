@@ -377,3 +377,38 @@ def test_a_changed_pdf_at_a_hidden_manuals_address_stays_hidden(world):
     crawl(world)
     assert world.one("SELECT hidden_reason FROM documents WHERE content_sha = %s",
                      (hashlib.sha256(new).hexdigest(),)) == (("takedown",),)
+
+
+def test_a_failed_page_linked_again_stays_failed_with_its_wait(world):
+    # Ruud batch 7: 22 failed pages showed as 'queued' after a run (crawl._set rewrote the state of every page never
+    # fetched), so status undercounted failures
+    serve(world, "/start", "/manual.pdf")
+    start(world)
+    crawl(world)
+    before = world.one("SELECT fetch_state, next_check_at FROM pages WHERE url = %s",
+                       (world.url("ruud.test", "/manual.pdf"),))[0]
+    assert before[0] == "failed"
+    crawl(world)
+    assert world.one("SELECT fetch_state, next_check_at FROM pages WHERE url = %s",
+                     (world.url("ruud.test", "/manual.pdf"),))[0] == before
+
+
+def test_a_page_linked_plain_and_percent_encoded_is_one_page(world):
+    # Ruud batch 7: six product pages stored twice, once with spaces and ® and once encoded with a trailing slash
+    serve(world, "/start", "/product/RO1H J2H Endeavor® Line", "/product/RO1H%20J2H%20Endeavor%C2%AE%20Line/")
+    serve(world, "/product/RO1H%20J2H%20Endeavor%C2%AE%20Line")
+    start(world)
+    crawl(world)
+    assert world.one("SELECT COUNT(*) FROM pages WHERE url LIKE %s", ("%/product/%",))[0][0] == 1
+    assert len([p for p in paths(world) if p.startswith("/product/")]) == 1
+
+
+def test_a_page_stored_plain_is_not_fetched_again_when_a_later_page_links_it_encoded(world):
+    serve(world, "/start", "/product/A B", "/next")
+    serve(world, "/product/A%20B")
+    start(world)
+    crawl(world)
+    serve(world, "/next", "/product/A%20B/")
+    world.clock.advance(31 * 24 * 3600)  # everything due again, /next now links the encoded twin
+    crawl(world)
+    assert world.one("SELECT COUNT(*) FROM pages WHERE url LIKE %s", ("%/product/%",))[0][0] == 1

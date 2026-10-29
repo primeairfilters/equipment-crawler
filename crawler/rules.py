@@ -19,6 +19,8 @@ _GOOD_TEXT = re.compile(
 _BAD_TEXT = re.compile(
     r"\b(read more|press releases?|news|blog|careers?|jobs|privacy|terms|cookies?|log ?in|sign ?in|cart|"
     r"subscribe|share)\b", re.I)
+_NOT_DOCUMENTS = {"jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tif", "tiff", "ico", "heic", "mp4", "mov", "m4v",
+                  "avi", "webm", "wmv", "mp3", "wav", "m4a", "exe", "msi", "dmg", "pkg", "apk"}  # pictures, media, installers
 _GOOD_FOLDERS = {"product", "products", "literature", "documents", "document", "downloads", "download", "manuals",
                  "specs", "specifications", "resources", "support", "technical", "docs"}
 
@@ -87,6 +89,14 @@ def is_pdf_link(url):
         return False
 
 
+def _extension(url):
+    try:
+        last = urlsplit(url).path.rsplit("/", 1)[-1]
+    except ValueError:
+        return None
+    return last.rsplit(".", 1)[-1].lower() if "." in last else None
+
+
 def _word_hits(keyword, part):
     keyword = keyword.lower()
     if keyword.endswith("*"):
@@ -110,6 +120,9 @@ def decide(url, text, *, keywords, page_is_article=False):
     text = " ".join((text or "").split())
     if is_pdf_link(url):
         return Decision("crawl", "a PDF", "rule")
+    kind = _extension(url)
+    if kind in _NOT_DOCUMENTS:  # fetched, it is refused as bad_content_type and retried for weeks (Ruud batch 6)
+        return Decision("skip", f"not a document (.{kind})", "rule", "skipped_rule")
     plain = [k for k in keywords if k.host is None]
     for k in plain:
         if k.effect == "skip" and keyword_hits(k.keyword, url):
