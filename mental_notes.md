@@ -31,3 +31,10 @@ Ruud batch 6: 20 of the 49 failures are `bad_content_type` on image and installe
 Search ranking after Ruud batch 6: eval is 16/25 (MRR 0.456), down from 17/25. The lost question is "How long does defrost run on the ductless heat pump and is it normal for the fans to stop?": a new rooftop-unit manual (doc 1265, DOAS RTU, p.88-90 "Heating, Cooling, Defrost, and Reheat") and a commercial heat pump spec sheet (doc 1258) now rank above the ductless manuals (docs 70, 72, 73). Search does not use the equipment type named in the question ("ductless", "mini split", "water heater") to filter or boost results, so the more commercial manuals get added, the more they crowd out residential answers. Decide whether search should detect the equipment type in the question and prefer sections of that type. Also: eval prints no per-question baseline we keep, so a drop like this takes digging to locate; consider saving each eval run's per-question output (for example eval/ruud.last.txt) and diffing against it.
 
 ---
+## 2026-10-28 20:05
+
+Two small crawl-state quirks seen after Ruud batch 7 (no documents lost; neither blocks anything):
+1. A failed page that is linked again gets `fetch_state` flipped from 'failed' to 'queued' (crawler/crawl.py `_set`, which writes the state whenever `fetched_at IS NULL`). Its retry timer and fail_count are kept, so the backoff still works, but the count of failed pages looks smaller than it is (47 failed before batch 7, 25 after; 42 of the 48 queued rows have fail_count > 0). Decide whether `_set` should leave 'failed' alone.
+2. Six Ruud product pages are stored twice: once as the raw address with spaces and ® (ids 1519, 1520, 1521, 1522, 1526, 1529, fetched) and once percent-encoded with a trailing slash (ids 1665-1668, 1677, 1682, queued, never fetched because the run treats them as already seen). A later run may fetch the same page again under the encoded address. Decide whether page addresses should be percent-normalized before they are stored.
+
+---
