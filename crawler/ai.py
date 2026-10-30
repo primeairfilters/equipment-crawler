@@ -142,6 +142,26 @@ class AnthropicClient:
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": LINK_SCHEMA}})
         return self._search_reply(reply)
 
+    def ask_host(self, model, text, max_tokens):
+        """One live call: is this host where the brand keeps its documents? The answer is a JSON object (HOST_SCHEMA)."""
+        from crawler.hostjudge import HOST_SCHEMA, HOST_SYSTEM
+        reply = self._sdk.messages.create(
+            model=model, max_tokens=max_tokens, system=self._system(HOST_SYSTEM),
+            messages=[{"role": "user", "content": text}],
+            thinking={"type": "disabled"},
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": HOST_SCHEMA}})
+        return self._search_reply(reply)
+
+    def judge_miss(self, model, text, max_tokens):
+        """One live call: does one of these sections answer the question Breeze missed? JSON (MISS_SCHEMA, P21)."""
+        from crawler.misses import MISS_SCHEMA, MISS_SYSTEM
+        reply = self._sdk.messages.create(
+            model=model, max_tokens=max_tokens, system=self._system(MISS_SYSTEM),
+            messages=[{"role": "user", "content": text}],
+            thinking={"type": "disabled"},
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": MISS_SCHEMA}})
+        return self._search_reply(reply)
+
     @staticmethod
     def _search_reply(reply):
         texts = [b.text for b in reply.content if getattr(b, "type", "") == "text"]

@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "ClearTheUploadsInbox",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "inbox/"},
+      "Expiration": {"Days": 30}
+    }
+  ]
+}

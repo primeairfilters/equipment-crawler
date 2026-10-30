@@ -56,3 +56,19 @@ Run it once to send, and again later to collect the answers:
 ./crawl hide manual 42 --reason "takedown request"      # or: hide manufacturer "Ruud" --reason ...; unhide the same way
 ./crawl check                                           # read-only health report of what Breeze can see
 ```
+
+## On its own (Round 5)
+
+```
+./crawl auto                                            # the nightly run (2 AM, ops/com.tracforce.crawler.auto.plist):
+                                                        # admin-page brands and uploads, crawl, tag, coverage and gap
+                                                        # filling, sections, embeddings, Breeze misses, parse issues
+./crawl uploads                                         # take in documents uploaded on the admin page now
+./crawl issues                                          # documents the code could not handle, as a Markdown fix list
+                                                        # for Claude (also parse-issues.md in the documents folder)
+./crawl misses                                          # sort what Breeze could not answer; eval-misses.json
+./crawl library upload                                  # copy local originals to the S3 bucket (DOCS_BUCKET)
+```
+
+The admin page (Tracforce /admin, built separately) logs in as `eq_admin` (`setup/pg-admin.sh`) and sees only the
+`control` schema; its contract is in the spec, §The admin page contract.

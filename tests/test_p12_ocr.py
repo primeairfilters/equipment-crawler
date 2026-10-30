@@ -77,7 +77,19 @@ def test_a_pdf_with_a_text_layer_never_starts_ocr(monkeypatch):
 def test_a_page_that_reads_as_french_or_spanish_is_left_empty():
     from crawler.textextract import extract_pdf
     found = extract_pdf(picture_pdf(picture_page("Charge du réfrigérant", FRENCH)))
-    assert found.pages == [""] and found.ocr_pages == set()
+    assert found.pages == [""] and found.ocr_pages == set() and found.left_out == {0}
+
+
+def test_a_page_left_out_as_french_or_spanish_is_marked_so_in_its_stored_text(world):
+    # run 4, 2026-10-30: docs 69 and 70 (English, then the same manual in Spanish and French as outlines) read as
+    # mostly scanned; their empty pages were the translations, left out on purpose
+    from crawler.textextract import index_page
+    from p3support import make_page, q
+    body = picture_pdf(picture_page("Installation Manual", BODY), picture_page("Charge du réfrigérant", FRENCH))
+    page_id = make_page(world.conn, world.brand_id, body, is_pdf=True)
+    index_page(world.conn, page_id, body, is_pdf=True)
+    assert q(world.conn, "SELECT page_number, has_text, left_out FROM page_text WHERE page_id = %s ORDER BY 1",
+             (page_id,)) == ((1, True, None), (2, False, "language"))
 
 
 def test_ocr_pages_give_layout_lines_and_their_sections_are_flagged_ocr():

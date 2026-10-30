@@ -25,6 +25,10 @@ services:
         required: false
       - path: ${HOME}/.config/tracforce-crawler/openai.env
         required: false
+      - path: ${HOME}/.config/tracforce-crawler/aws.env
+        required: false
+      - path: ${HOME}/.config/tracforce-crawler/admin.env  # eq_admin, only for the tests of the admin page's rights
+        required: false
     volumes:
       - .:/work:ro
       - ${HOME}/Documents/equipment-crawler-docs:/docs

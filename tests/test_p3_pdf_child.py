@@ -101,3 +101,27 @@ def test_child_output_over_the_parents_limit_is_an_error(monkeypatch):
     monkeypatch.setattr(textextract, "PDF_MAX_OUTPUT_BYTES", 50)
     with pytest.raises(textextract.ExtractError):
         textextract.extract_pdf(pdf)
+
+
+def _kerned_pdf(words_per_line, lines=12, gap=220):
+    """Words set apart by kerning (TJ offsets of `gap` thousandths of an em), with no space characters: how Ruud's
+    condensing boiler manuals (docs 638, 641, 642, 655, 657) print their body text."""
+    line = "[" + f" -{gap} ".join(f"({w})" for w in words_per_line) + "] TJ"
+    ops = ["BT", "/F1 10 Tf", "12 TL", "72 700 Td"] + [line + " T*"] * lines + ["ET"]
+    return make_pdf([[]], drawings=[ops])
+
+
+WORDS = ["The", "heat", "exchanger", "has", "a", "small", "amount", "of", "combustion", "chamber", "insulation"]
+
+
+def test_words_set_apart_by_kerning_are_read_as_words():
+    # parse issue garbled_text (2026-10-30): pdfplumber's fixed 3-point tolerance glued words 2.2 points apart
+    from crawler.textextract import extract_pdf
+    text = extract_pdf(_kerned_pdf(WORDS)).pages[0]
+    assert "The heat exchanger has a small amount of combustion chamber insulation" in text
+
+
+def test_letters_of_one_word_are_never_split():
+    from crawler.textextract import extract_pdf
+    text = extract_pdf(make_pdf([["Installation instructions for the condensing boiler"] * 5])).pages[0]
+    assert "Installation instructions for the condensing boiler" in text

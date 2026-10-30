@@ -10,6 +10,7 @@ Text outside its clipping path is not read: a viewer never shows it, but pdfmine
 """
 import io
 import json
+import re
 import statistics
 import sys
 
@@ -38,19 +39,41 @@ def find_tables(page):
     return kept
 
 
+GLUED_RUN = 20  # letters in a row: longer is words run together
+SPACING_RATIO = 0.15  # word gap as a share of the font size, for a page whose words come out glued
+
+
+def _glued(text):
+    """The share of letter runs that are words run together ("Theheatexchangerhasasmallamount")."""
+    runs = [r for r in re.findall(r"[A-Za-z]+", text) if len(r) >= 4]
+    return sum(len(r) > GLUED_RUN for r in runs) / len(runs) if len(runs) >= 10 else 0.0
+
+
+def _text(page):
+    """pdfplumber's text. Words set apart by kerning rather than spaces, closer than its fixed 3-point tolerance, come
+    out glued (Ruud's condensing boiler manuals: 2.2 points at 10-point type, parse issue 2026-10-30); such a page is
+    read again with a tolerance that scales with the font, and kept if that reads more words. Other pages are left
+    as they were."""
+    text = page.extract_text() or ""
+    if _glued(text) < 0.1:
+        return text
+    spaced = page.extract_text(x_tolerance_ratio=SPACING_RATIO) or ""
+    return spaced if _glued(spaced) < _glued(text) else text
+
+
 def page_text(page):
     """Text outside ruled tables, then each ruled table as tab-separated rows (empty cells kept)."""
     try:
         tables = find_tables(page)
         if not tables:
-            return page.extract_text() or ""
-        parts = [page.filter(_outside([t.bbox for t in tables])).extract_text() or ""]
+            return _text(page)
+        parts = [_text(page.filter(_outside([t.bbox for t in tables])))]
         for table in tables:
             parts.append("\n".join("\t".join((cell or "").replace("\n", " ") for cell in row)
                                    for row in table.extract()))
         return "\n".join(parts)
     except Exception:
-        return page.extract_text() or ""
+        return _text(page)
 
 
 def _glyph_run(shapes, gap=10):
@@ -325,6 +348,7 @@ def main():
     data = sys.stdin.buffer.read()
     pages, layouts, rows = [], [], []
     with pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {})) as pdf:
+        total = len(pdf.pages)  # more than max_pages: the document was cut (a parse issue)
         for page in pdf.pages[:max_pages]:
             pages.append(page_text(page)[:MAX_PAGE_CHARS])
             try:
@@ -335,7 +359,7 @@ def main():
                 layouts.append(page_layout(page))
             page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
             next_page()
-    out = {"pages": pages, "rows": rows}
+    out = {"pages": pages, "rows": rows, "page_total": total}
     if layout:
         out["layout"] = layouts
     sys.stdout.write(json.dumps(out))

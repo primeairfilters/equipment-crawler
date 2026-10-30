@@ -198,6 +198,10 @@ class Fetcher:
         return [r[0] for r in self._rows(
             "SELECT host FROM brand_domains WHERE brand_id = %s AND status = 'approved'", (brand_id,))]
 
+    def _pdf_only(self, brand_id, host):
+        return bool(self._rows("SELECT 1 FROM brand_domains WHERE brand_id = %s AND status = 'approved' AND scope = 'pdf' "
+                               "AND host = %s LIMIT 1", (brand_id, host)))
+
     def _host_row(self, host):
         self._exec("INSERT INTO hosts (host) VALUES (%s) ON CONFLICT (host) DO NOTHING", (host,))
         row = self._rows("SELECT id, rest_until, ignore_robots, use_browser FROM hosts WHERE host = %s", (host,))[0]
@@ -546,6 +550,8 @@ class Fetcher:
             is_pdf = kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
+            if not is_pdf and self._pdf_only(brand_id, target.host):  # a host the crawler approved gives PDFs only (P18)
+                return failed("pdf_only_host", raw.status)
             mime = "application/pdf" if is_pdf else kind_of(raw.headers)  # octet-stream PDFs are kept as PDFs
 
             sha = hashlib.sha256(raw.body).hexdigest()

@@ -42,9 +42,32 @@ def test_the_schema_asks_for_every_tag():
     assert props["equipment_type"]["enum"] == EQUIPMENT_TYPES and "heat_pump" in EQUIPMENT_TYPES
 
 
-def test_the_extractor_version_is_3_so_documents_tagged_before_are_tagged_again_once():
+def test_the_extractor_version_is_4_so_documents_tagged_before_are_tagged_again_once():
+    # 4: Tracforce's trades and every trade's equipment types (D83)
     from crawler.extract import EXTRACTOR_VERSION
-    assert EXTRACTOR_VERSION == "3"
+    assert EXTRACTOR_VERSION == "4"
+
+
+def test_the_trades_are_tracforces_trades():
+    # D83: HVACApp app/Services/TradeStarters.php, read 2026-10-29
+    from crawler.extract import TRADES
+    assert TRADES == ["hvac", "plumbing", "electrical", "commercial_refrigeration", "appliance_repair", "pool_spa",
+                      "generators", "water_treatment", "garage_doors", "other"]
+
+
+def test_every_trade_has_its_own_equipment_types_and_the_prompt_names_them_by_trade():
+    from crawler.extract import EQUIPMENT_BY_TRADE, EQUIPMENT_TYPES, SYSTEM, TRADES
+    assert set(EQUIPMENT_BY_TRADE) == set(TRADES) - {"other"}
+    for types in EQUIPMENT_BY_TRADE.values():
+        assert types and set(types) <= set(EQUIPMENT_TYPES)
+    for kind in ("pool_pump", "pool_heater", "generator", "transfer_switch", "garage_door_opener", "water_softener",
+                 "ice_machine", "walk_in", "washer", "dryer", "range_oven", "panel_breaker", "heat_pump",
+                 "water_heater", "accessory", "other"):
+        assert kind in EQUIPMENT_TYPES, kind
+    assert len(EQUIPMENT_TYPES) == len(set(EQUIPMENT_TYPES))
+    for trade, types in EQUIPMENT_BY_TRADE.items():
+        assert f"{trade}: {', '.join(types)}" in SYSTEM
+    assert "water heaters are plumbing" in SYSTEM.lower()
 
 
 def test_every_tag_is_stored_on_the_document(runtime_conn):

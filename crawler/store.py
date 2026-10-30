@@ -86,6 +86,13 @@ def brand_manufacturer(conn, brand_id):
     return _new_manufacturer(conn, name, key)
 
 
+def page_manufacturer(conn, brand_id, page_id):
+    """The manufacturer of the document a page holds: its brand's, or for a file uploaded on the admin page the one
+    the user picked or its text named (None: no brand found, D84)."""
+    upload = _rows(conn, "SELECT manufacturer_id FROM control.uploads WHERE page_id = %s", (page_id,))
+    return upload[0][0] if upload else brand_manufacturer(conn, brand_id)
+
+
 def save_model(conn, manufacturer_id, number, *, is_base_model=False, energy_star=False):
     """The model's id; made if new. energy_star=True marks it confirmed by ENERGY STAR."""
     return _one(
@@ -110,7 +117,7 @@ def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, mo
     tags = {k: v for k, v in (tags or {}).items() if k in TAG_COLUMNS}
     conn_exec(conn, "SAVEPOINT save_document")
     try:
-        manufacturer_id = brand_manufacturer(conn, brand_id)
+        manufacturer_id = page_manufacturer(conn, brand_id, page_id)
         document_id = _one(
             conn,
             "INSERT INTO documents (content_sha, manufacturer_id, title, canonical_url, doc_type, tagged_by, tagger_version, "
@@ -154,7 +161,7 @@ def save_document(conn, *, brand_id, page_id, source_url, title, content_sha, mo
         conn_exec(conn, "INSERT INTO document_urls (document_id, page_id, url) VALUES (%s, %s, %s) "
                         "ON CONFLICT (document_id, page_id) DO UPDATE SET last_seen_at = (now() AT TIME ZONE 'UTC')",
                   (document_id, page_id, source_url))
-        for entry in models:
+        for entry in models if manufacturer_id is not None else ():  # a model belongs to a manufacturer
             model_id = save_model(conn, manufacturer_id, entry["model_number"], is_base_model=bool(entry.get("is_base_model")))
             if tags.get("trade") or tags.get("equipment_type"):
                 conn_exec(conn, "UPDATE models SET trade = COALESCE(trade, %s), equipment_type = COALESCE(equipment_type, %s) "

@@ -61,8 +61,9 @@ WITH meaning AS (
   FULL JOIN codes c ON c.section_id = COALESCE(m.section_id, w.section_id)
 )
 SELECT f.section_id, s.document_id, d.title, s.doc_type, s.page_from, s.page_to, d.canonical_url, s.heading_path,
-       s.kind, s.body, d.content_sha, f.score, f.meaning_rank, f.distance, f.words_rank, f.codes_rank
+       s.kind, s.body, d.content_sha,
+       f.score * CASE WHEN s.equipment_type = ANY (%(equipment)s::text[]) THEN %(boost)s ELSE 1 END AS score,
+       f.meaning_rank, f.distance, f.words_rank, f.codes_rank
 FROM fused f JOIN kb.sections s ON s.id = f.section_id JOIN kb.documents d ON d.id = s.document_id
-ORDER BY f.score * CASE WHEN s.equipment_type = ANY (%(equipment)s::text[]) THEN %(boost)s ELSE 1 END DESC,
-         f.section_id
+ORDER BY score DESC, f.section_id
 LIMIT %(top)s

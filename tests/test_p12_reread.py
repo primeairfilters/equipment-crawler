@@ -31,12 +31,17 @@ def document(world, sha):
     return world.one("SELECT page_count, text_pages, needs_ocr FROM documents WHERE content_sha = %s", (sha,))
 
 
+
+def counts(result):
+    """reread's counts (it also lists the documents it read, for parse issues)."""
+    return {k: result[k] for k in ("read", "unreadable")}
+
 def test_a_pdf_the_reader_failed_on_is_read_again_from_the_kept_original(world, monkeypatch):
     from crawler.documents import reread
     sha = unreadable_crawl(world, monkeypatch, "/manual.pdf")
     assert document(world, sha) == ((0, 0, False),)
     hits = len(world.site.hits())
-    assert reread(world.conn) == {"read": 1, "unreadable": 0}
+    assert counts(reread(world.conn)) == {"read": 1, "unreadable": 0}
     assert document(world, sha) == ((2, 2, False),)
     assert world.one("SELECT extraction_status FROM pages WHERE url = %s",
                      (world.url("ruud.test", "/manual.pdf"),)) == (("waiting",),)  # now goes to the AI for tags
@@ -57,7 +62,7 @@ def test_a_document_already_read_is_left_alone(world, monkeypatch):
     serve(world, "/start", "/ok.pdf")
     serve_pdf(world, "/ok.pdf")
     crawl(world)
-    assert reread(world.conn) == {"read": 0, "unreadable": 0}
+    assert counts(reread(world.conn)) == {"read": 0, "unreadable": 0}
 
 
 def test_status_says_how_many_documents_could_not_be_read(world, monkeypatch):
@@ -82,7 +87,7 @@ def test_a_document_needing_ocr_is_read_again_so_a_better_reader_can_recover_pag
     sha = hashlib.sha256(body).hexdigest()
     assert document(world, sha) == ((2, 0, True),)
     monkeypatch.setattr(crawler.textextract, "extract_pdf", real)
-    assert reread(world.conn) == {"read": 1, "unreadable": 0}
+    assert counts(reread(world.conn)) == {"read": 1, "unreadable": 0}
     assert document(world, sha) == ((2, 2, False),)
 
 
@@ -102,9 +107,9 @@ def test_a_document_cut_at_an_old_page_limit_is_read_whole_when_named(world):
         crawler.textextract.extract_pdf.__defaults__ = defaults
     sha = hashlib.sha256(body).hexdigest()
     assert document(world, sha) == ((1, 1, False),)
-    assert reread(world.conn) == {"read": 0, "unreadable": 0}  # nothing marks it as cut
+    assert counts(reread(world.conn)) == {"read": 0, "unreadable": 0}  # nothing marks it as cut
     doc = world.one("SELECT id FROM documents WHERE content_sha = %s", (sha,))[0][0]
-    assert reread(world.conn, documents=[doc]) == {"read": 1, "unreadable": 0}
+    assert counts(reread(world.conn, documents=[doc])) == {"read": 1, "unreadable": 0}
     assert document(world, sha) == ((2, 2, False),)
 
 

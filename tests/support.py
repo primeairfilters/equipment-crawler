@@ -12,7 +12,9 @@ TESTING_DB = "tracforce_equipment_testing"
 SEARCH_PATH = "crawl,kb,public"
 
 # The real AI key must never be visible to a test or to anything a test starts, so no test can spend money.
-AI_KEYS = ("ANTHROPIC_API_KEY_CRAWLER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY_CRAWLER")
+AI_KEYS = ("ANTHROPIC_API_KEY_CRAWLER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY_CRAWLER",
+           # and the real S3 bucket (P16, D80): no test reads or writes the prod originals
+           "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DOCS_BUCKET")
 
 
 def clean_env(**extra):
@@ -40,9 +42,9 @@ def db_name():
 
 
 def connect(kind, autocommit=False, dbname=None):
-    """kind is 'runtime', 'migrate' or 'breeze'. Credentials come from EQ_<KIND>_USER / _PASSWORD."""
+    """kind is 'runtime', 'migrate', 'breeze' or 'admin'. Credentials come from EQ_<KIND>_USER / _PASSWORD."""
     prefix = "EQ_" + kind.upper()
-    path = "kb,public" if kind == "breeze" else SEARCH_PATH
+    path = {"breeze": "kb,public", "admin": "control,public"}.get(kind, SEARCH_PATH)
     return psycopg.connect(
         host=os.environ.get("EQ_DB_HOST", "pg"),
         port=int(os.environ.get("EQ_DB_PORT", "5432")),

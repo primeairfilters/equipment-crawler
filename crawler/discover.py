@@ -18,7 +18,9 @@ DEFAULT_CAP_USD = "25"
 MAX_URL_LENGTH = 2048
 
 DISCOVER_SYSTEM = (
-    "You find where a heating, cooling or refrigeration equipment brand publishes its product data online.\n"
+    "You find where an equipment brand publishes its product data online. The brand makes equipment that service "
+    "technicians install or repair (HVAC, plumbing, electrical, refrigeration, appliances, pools and spas, generators, "
+    "water treatment, garage doors).\n"
     "Use web search. Report only what you actually saw in search results:\n"
     "- domains: the brand's own web domains (host names only, like www.ruud.com).\n"
     "- document_hosts: other hosts that serve the brand's spec sheets, manuals or PDFs (like files.myrheem.com).\n"

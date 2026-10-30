@@ -72,6 +72,13 @@ def build_parser():
     different.add_argument("first", type=int)
     different.add_argument("second", type=int)
     different.add_argument("--reason", required=True)
+    sub.add_parser("auto", help="the nightly run: crawl, tag, sections, embed, prune and check every active brand, then "
+                                "report (one run at a time)")
+    sub.add_parser("misses", help="sort what Breeze could not answer, and write the answered ones as eval questions")
+    sub.add_parser("issues", help="write the documents the code could not handle as a Markdown fix list for Claude")
+    sub.add_parser("uploads", help="take in the documents uploaded on the admin page now (the nightly run does it too)")
+    store = sub.add_parser("library", help="the originals library: upload copies the local folder's originals to S3")
+    store.add_argument("action", choices=["upload"])
     sub.add_parser("check", help="a read-only health report of what Breeze can see")
     stop = sub.add_parser("stop", help="stop a brand or a host")
     stop.add_argument("target")
@@ -178,10 +185,16 @@ def _preview(name):
     import os
     from crawler.sections import build_sections
     from crawler.textextract import extract_layout
-    folder = os.environ.get("DOCS_DIR") or ""
-    path = name if os.path.exists(name) else os.path.join(folder, name if name.endswith(".pdf") else f"{name}.pdf")
-    with open(path, "rb") as handle:
-        sections = build_sections(extract_layout(handle.read()))
+    from crawler import library
+    if os.path.exists(name):
+        with open(name, "rb") as handle:
+            data = handle.read()
+    else:
+        data = library.read(name[:-4] if name.endswith(".pdf") else name)
+        if data is None:
+            print(f"No original {name} in the library.")
+            return
+    sections = build_sections(extract_layout(data))
     if not sections:
         print("No sections: the PDF has no readable text (a scan, or text drawn as shapes). It needs OCR.")
     for n, s in enumerate(sections, start=1):
@@ -395,6 +408,82 @@ def main(argv):
                 first, second = not_duplicates(conn, args.first, args.second, reason=args.reason,
                                                by_whom=getpass.getuser())
                 print(f"Marked {first} and {second} as different manuals; check will not list them as duplicates.")
+            elif args.command == "auto":
+                from crawler.auto import run_auto
+                from crawler.db import connect as connect_as
+                from crawler.embed import OpenAIEmbedder
+                from crawler.fetch import Fetcher
+                try:
+                    from crawler.ai import AnthropicClient
+                    ai_client = AnthropicClient()
+                except RuntimeError:
+                    print("No Anthropic key is set, so tonight's documents wait untagged.")
+                    ai_client = None
+                try:
+                    embedder = OpenAIEmbedder()
+                except RuntimeError:
+                    print("No OpenAI key is set, so new sections wait without vectors.")
+                    embedder = None
+                summary = run_auto(conn, fetcher=Fetcher(conn), link_checker=_link_checker(), ai_client=ai_client,
+                                   embedder=embedder, owner_connect=lambda: connect_as("migrate"), commit=conn.commit)
+                if summary["state"] == "skipped":
+                    print("Another run is still going; this one was skipped.")
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT report FROM runs WHERE id = %s", (summary["run_id"],))
+                        print(cur.fetchone()[0], end="")
+            elif args.command == "misses":
+                import json
+                from crawler.misses import eval_cases, sort_misses, uncovered_brands
+                try:
+                    from crawler.ai import AnthropicClient
+                    client = AnthropicClient()
+                except RuntimeError:
+                    client = None
+                try:
+                    from crawler.embed import OpenAIEmbedder
+                    embedder = OpenAIEmbedder()
+                except RuntimeError:
+                    embedder = None
+                done = sort_misses(conn, client=client, embedder=embedder, after_miss=conn.commit)
+                conn.commit()
+                print(", ".join(f"{k.replace('_', ' ')} {v}" for k, v in done.items()))
+                for brand, count in uncovered_brands(conn):
+                    print(f"  not covered: {brand} ({count})")
+                cases = eval_cases(conn)
+                folder = os.environ.get("DOCS_DIR")
+                if folder and cases:
+                    with open(os.path.join(folder, "eval-misses.json"), "w", encoding="utf-8") as handle:
+                        json.dump(cases, handle, indent=2)
+                    print(f"{len(cases)} eval question(s) from Breeze misses in eval-misses.json in the documents "
+                          "folder; score them with ./crawl eval /docs/eval-misses.json")
+            elif args.command == "issues":
+                from crawler.issues import report, scan
+                scan(conn)
+                text = report(conn)
+                conn.commit()
+                folder = os.environ.get("DOCS_DIR")
+                if folder:
+                    with open(os.path.join(folder, "parse-issues.md"), "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                    print("Wrote parse-issues.md in the documents folder (~/Documents/equipment-crawler-docs on the Mac).")
+                print(text, end="")
+            elif args.command == "uploads":
+                from crawler.control import sync
+                from crawler.uploads import process_uploads
+                sync(conn)
+                done = process_uploads(conn, after_upload=conn.commit)
+                conn.commit()
+                print(f"Uploads: added {done['added']}, already had {done['already_had']}, rejected {done['rejected']}. "
+                      "New ones are tagged and searchable after the next nightly run (or ./crawl auto).")
+            elif args.command == "library":
+                from crawler import library
+                if not os.environ.get("DOCS_BUCKET"):
+                    raise ValueError("DOCS_BUCKET is not set (~/.config/tracforce-crawler/aws.env), so there is no S3 "
+                                     "library to upload to")
+                counts = library.upload_local()
+                print(f"Originals: {counts['uploaded']} uploaded, {counts['already there']} already in S3, "
+                      f"{counts['failed']} failed (each checked by S3 against its SHA-256).")
             elif args.command == "check":
                 from crawler.kb import check
                 report = check(conn)
@@ -409,6 +498,10 @@ def main(argv):
                 print(f"{report['needs_ocr']} manuals have pages with no text even after OCR (blank, drawings, "
                       f"Spanish/French). {report['live_without_vectors']} live sections have no vector yet "
                       "(./crawl embed).")
+                if report["missing_originals"]:
+                    problems += 1
+                    print(f"{len(report['missing_originals'])} live manuals whose original PDF is not in the library: "
+                          f"{report['missing_originals'][:20]}")
                 if report["marked_different"]:
                     print(f"{_plural(report['marked_different'], 'pair')} of manuals marked as different products "
                           "(not listed as duplicates).")

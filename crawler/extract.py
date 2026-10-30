@@ -12,14 +12,14 @@ import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from crawler import ai
+from crawler import ai, issues
 from crawler.brands import UnknownTarget, find_brand
 from crawler.db import try_lock, unlock
 from crawler.kb import hide
 from crawler.store import save_document
 from crawler.verify import verify
 
-EXTRACTOR_VERSION = "3"
+EXTRACTOR_VERSION = "4"  # 4: Tracforce's trades and their equipment types (D83)
 MAX_PAGES_SENT = 20
 PROMPT_TOKEN_LIMIT = 100_000
 SPLIT_TARGET_TOKENS = 95_000
@@ -29,15 +29,32 @@ RETRY_AFTER = timedelta(days=1)
 
 DOC_TYPES = ["spec_sheet", "install_manual", "service_manual", "parts_list", "warranty", "brochure", "other",
              "not_equipment"]
-TRADES = ["hvac", "refrigeration", "plumbing", "electrical", "appliance", "other"]
-EQUIPMENT_TYPES = ["air_conditioner", "heat_pump", "furnace", "air_handler", "evaporator_coil", "ductless_mini_split",
-                   "packaged_unit", "boiler", "water_heater", "thermostat_control", "chiller", "refrigeration_unit",
-                   "ventilation", "indoor_air_quality", "accessory", "other"]
+# Tracforce's trades (D83: HVACApp app/Services/TradeStarters.php, read 2026-10-29), so a job's trade can rank results
+TRADES = ["hvac", "plumbing", "electrical", "commercial_refrigeration", "appliance_repair", "pool_spa", "generators",
+          "water_treatment", "garage_doors", "other"]
+# Each trade's equipment types. The HVAC ones are the keys already stored (search.sql and Breeze use them); a type may
+# sit under two trades (a transfer switch is electrical and generators).
+EQUIPMENT_BY_TRADE = {
+    "hvac": ["air_conditioner", "heat_pump", "furnace", "air_handler", "evaporator_coil", "ductless_mini_split",
+             "packaged_unit", "boiler", "chiller", "thermostat_control", "ventilation", "indoor_air_quality"],
+    "plumbing": ["water_heater", "fixture_faucet", "toilet", "garbage_disposer", "sump_sewage_pump", "well_pump",
+                 "backflow_valve"],
+    "electrical": ["panel_breaker", "transfer_switch", "surge_protection", "ev_charger", "lighting", "wiring_device"],
+    "commercial_refrigeration": ["refrigeration_unit", "walk_in", "reach_in", "ice_machine"],
+    "appliance_repair": ["refrigerator", "freezer", "washer", "dryer", "dishwasher", "range_oven", "cooktop",
+                         "microwave", "range_hood"],
+    "pool_spa": ["pool_pump", "pool_heater", "pool_filter", "pool_chlorinator", "pool_cleaner", "spa_hot_tub"],
+    "generators": ["generator", "transfer_switch"],
+    "water_treatment": ["water_softener", "water_filter", "reverse_osmosis", "uv_disinfection"],
+    "garage_doors": ["garage_door_opener", "garage_door"],
+}
+EQUIPMENT_TYPES = list(dict.fromkeys([t for types in EQUIPMENT_BY_TRADE.values() for t in types] + ["accessory", "other"]))
 MAX_TITLE = 300
 MAX_FORM_NUMBER = 60
 
 SYSTEM = (
-    "You read equipment documents (heating, cooling, refrigeration and other trades) and tag each one.\n"
+    "You read equipment documents from every service trade (HVAC, plumbing, electrical, refrigeration, appliances, "
+    "pools and spas, generators, water treatment, garage doors) and tag each one.\n"
     "Rules:\n"
     "- doc_type is one of: " + ", ".join(DOC_TYPES) + ". Use not_equipment for anything that is not about equipment "
     "(annual reports, catalogs of company news, legal notices).\n"
@@ -45,7 +62,11 @@ SYSTEM = (
     "outside knowledge.\n"
     "- For a wildcard or range pattern (for example RA15AZ**AJ or RA15AZ24-60), report only the fixed part, e.g. RA15AZ.\n"
     "- If no model number is printed, return an empty list.\n"
-    "- trade is one of: " + ", ".join(TRADES) + ". equipment_type is one of: " + ", ".join(EQUIPMENT_TYPES) + ".\n"
+    "- trade is the trade whose technician services the equipment, one of: " + ", ".join(TRADES) + ". Water heaters are "
+    "plumbing (heat pump water heaters too).\n"
+    "- equipment_type is one of these, listed by trade:\n"
+    + "".join(f"  {trade}: {', '.join(types)}\n" for trade, types in EQUIPMENT_BY_TRADE.items())
+    + "  any trade: accessory (parts and add-ons), other.\n"
     "- language is the document's two-letter ISO 639-1 code (en, es, fr...).\n"
     "- form_number is the document's printed form or publication number exactly as printed (like A22-336), or an empty "
     "string if none is printed. title is the document's printed title, or an empty string.\n"
@@ -175,6 +196,9 @@ def _finish_page(conn, page, results, now):
     if any(rejected):
         # paid for and unusable: read again only when the text changes or the extractor version does
         _clear_batch(conn, page_id, "failed", None, True, ai_extractor_version=EXTRACTOR_VERSION)
+        issues.record(conn, content_sha, "tagging_failed", {
+            "error": "the AI's answer could not be used", "page_id": page_id,
+            "answers": [(r.raw_text or "")[:500] for r in results if r.output is None or not _usable(r.output)][:2]})
         return False
     texts, title = _texts(conn, page_id, page_count)
     chosen = pick_pages(texts)
@@ -194,8 +218,10 @@ def _finish_page(conn, page, results, now):
         save_document(conn, brand_id=brand_id, page_id=page_id, source_url=url, title=found.pop("title") or title,
                       content_sha=content_sha, models=[{"model_number": m[:190]} for m in good], extracted_by=extracted_by,
                       doc_type=doc_type, tags=found, tagger_version=EXTRACTOR_VERSION)
-    except Exception:  # the document's write was rolled back as a whole; try it again tomorrow
+    except Exception as exc:  # the document's write was rolled back as a whole; try it again tomorrow
         _clear_batch(conn, page_id, "failed", None, True, ai_extractor_version=EXTRACTOR_VERSION)
+        issues.record(conn, content_sha, "tagging_failed", {"error": f"{exc.__class__.__name__}: {str(exc)[:500]}",
+                                                            "page_id": page_id, "doc_type": doc_type})
         return False
     _clear_batch(conn, page_id, "extracted", ai_extracted_sha=pending, ai_extractor_version=EXTRACTOR_VERSION)
     return True

@@ -145,7 +145,7 @@ def test_a_found_document_on_an_approved_host_becomes_a_start_url_and_ahri_never
     ]}
     run(runtime_conn, FakeGapAI(docs), name)
     rows = q(runtime_conn, "SELECT url, found_by FROM start_urls WHERE brand_id = %s", (brand_id,))
-    assert rows == (("https://ruud.test/docs/ra15az-spec.pdf", "discover"),)
+    assert rows == (("https://ruud.test/docs/ra15az-spec.pdf", "gapfill"),)  # labelled for what found it (P20; was "discover")
 
 
 def test_the_search_is_logged_with_its_one_search_and_cost(runtime_conn):

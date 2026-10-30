@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The nightly crawler run (P17, Q19): `./crawl auto` at 2 AM. Installed by the user:
+     cp ops/com.tracforce.crawler.auto.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.tracforce.crawler.auto.plist
+     A run missed while the Mac sleeps happens at the next wake. Docker Desktop must be running. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tracforce.crawler.auto</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p "$HOME/Library/Logs/tracforce-crawler" &amp;&amp; cd "$HOME/Documents/repos/equipment-crawler" &amp;&amp; ./crawl auto &gt;&gt; "$HOME/Library/Logs/tracforce-crawler/auto.log" 2&gt;&amp;1</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

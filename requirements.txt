@@ -7,3 +7,4 @@ pdfplumber==0.11.10
 anthropic==1.15.0
 defusedxml==0.7.1
 playwright==1.63.0
+boto3==1.40.76

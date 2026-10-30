@@ -354,3 +354,8 @@ def test_cli_add_ok_status_stop_round_trip(runtime_conn):
 
     missing = crawl("stop", uniq("[T] nobody"))
     assert missing.returncode != 0
+
+    # the CLI commits: leave the brand stopped (paused on the admin page) so later `auto` tests never walk it
+    assert crawl("stop", brand).returncode == 0
+    assert one(runtime_conn, "SELECT c.state, b.status FROM control.brands c JOIN brands b ON b.id = c.crawl_brand_id "
+                             "WHERE b.name_key = %s", (brand.lower(),)) == (("paused", "stopped"),)

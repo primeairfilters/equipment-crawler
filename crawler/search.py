@@ -14,7 +14,7 @@ logged in ai_calls (purpose 'ask') and checked against the monthly cap first. Re
 """
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +31,9 @@ EF_SEARCH = 8 * DEPTH  # HNSW candidates; at 400 the meaning list matched an exa
 MAX_DISTANCE = 0.8  # a meaning match further than this is noise, not a match
 WIDEN_DISTANCE = 0.6  # to be tuned with ./crawl eval
 TOP = 8
+PREFER_MODEL = 2.0  # D82: the model's own manuals and its series manuals, then
+PREFER_BRAND = 1.5  # the brand's (and its sister brands' shared) manuals, then everything else at 1
+FOREIGN_CODE = 0.3  # another brand's section matched through an error or part code in a brand question
 LANGUAGE = "en"  # Breeze's techs ask in English
 EQUIPMENT_BOOST = 1.5  # a section of the equipment the question names: its merged score times this (a boost, not a
 # filter: AI tags are not always right, doc 80 is a ductless manual tagged heat_pump). Ruud eval 2026-10-29: none 16/25,
@@ -40,6 +43,42 @@ EQUIPMENT_BOOST = 1.5  # a section of the equipment the question names: its merg
 # pump" is a mini split, not every heat pump. Breeze copies this list with search.sql.
 EQUIPMENT_WORDS = [
     (r"heat pump water heaters?|hybrid water heaters?|hpwh", ["heat_pump", "water_heater"]),
+    # the other Tracforce trades (D83); multi-word names first, and no bare "range", "panel" or "filter" (a pressure
+    # range, an access panel and an air filter are HVAC words)
+    (r"salt (water )?(chlorine )?generators?|salt (cells?|systems?)|(salt )?chlorinators?", ["pool_chlorinator"]),
+    (r"pool (and spa )?heaters?|spa heaters?", ["pool_heater"]),
+    (r"pool pumps?|variable speed pool pumps?", ["pool_pump"]),
+    (r"pool filters?|sand filters?|cartridge filters?", ["pool_filter"]),
+    (r"pool cleaners?|robotic cleaners?", ["pool_cleaner"]),
+    (r"hot tubs?|spas?", ["spa_hot_tub"]),
+    (r"(automatic )?transfer switch(es)?", ["transfer_switch"]),
+    (r"(standby |portable |home )?generators?|gensets?", ["generator"]),
+    (r"garage door openers?|door openers?", ["garage_door_opener"]),
+    (r"garage doors?", ["garage_door"]),
+    (r"water softeners?|softeners?", ["water_softener"]),
+    (r"reverse osmosis|ro systems?", ["reverse_osmosis"]),
+    (r"(whole house )?water filters?", ["water_filter"]),
+    (r"ice machines?|ice makers?", ["ice_machine"]),
+    (r"walk[- ]ins?( coolers?| freezers?| boxes?)?", ["walk_in"]),
+    (r"reach[- ]ins?( coolers?| freezers?| refrigerators?)?", ["reach_in"]),
+    (r"range hoods?|vent hoods?", ["range_hood"]),
+    (r"ovens?|stoves?|(gas|electric|induction) ranges?", ["range_oven"]),
+    (r"cooktops?", ["cooktop"]),
+    (r"microwaves?", ["microwave"]),
+    (r"dishwashers?", ["dishwasher"]),
+    (r"washers?|washing machines?", ["washer"]),
+    (r"dryers?", ["dryer"]),
+    (r"refrigerators?|fridges?", ["refrigerator"]),
+    (r"freezers?", ["freezer"]),
+    (r"(electrical|main|breaker) panels?|breaker box(es)?|load centers?|(circuit )?breakers?", ["panel_breaker"]),
+    (r"ev chargers?|evse|car chargers?", ["ev_charger"]),
+    (r"surge protect(ors?|ion)", ["surge_protection"]),
+    (r"garbage dispos(ers?|als?)", ["garbage_disposer"]),
+    (r"sump pumps?|sewage pumps?|ejector pumps?", ["sump_sewage_pump"]),
+    (r"well pumps?", ["well_pump"]),
+    (r"toilets?", ["toilet"]),
+    (r"faucets?", ["fixture_faucet"]),
+    (r"backflow( preventers?)?", ["backflow_valve"]),
     (r"ductless( heat pumps?| splits?)?|mini[- ]?splits?|wall[- ]mount(ed)? (units?|splits?)", ["ductless_mini_split"]),
     (r"(tankless )?water heaters?|tankless", ["water_heater"]),
     (r"rooftop( units?)?|rtus?|packaged units?", ["packaged_unit"]),
@@ -99,16 +138,11 @@ def model_documents(conn, model, manufacturer_id=None):
               "ORDER BY 1", (prefixes, key, key + "\x7f", manufacturer_id, manufacturer_id))]
 
 
-def levels(conn, model=None, manufacturer=None):
-    """[(level name, documents or None, manufacturer id or None)], narrowest first."""
-    maker = find_manufacturer(conn, manufacturer) if manufacturer else None
-    out = []
-    if model:
-        out.append(("model", model_documents(conn, model, maker), None))
-    if maker is not None:
-        out.append(("manufacturer", None, maker))
-    out.append(("all", None, None))
-    return out
+def brand_documents(conn, manufacturer_id):
+    """Every document that belongs to the manufacturer: its own and those its addresses also serve (Q23)."""
+    return [r[0] for r in _rows(conn, "SELECT document_id FROM document_brands WHERE manufacturer_id = %s UNION "
+                                      "SELECT id FROM documents WHERE manufacturer_id = %s ORDER BY 1",
+                                (manufacturer_id, manufacturer_id))]
 
 
 def equipment_types(question):
@@ -147,19 +181,34 @@ def _relevant(hits):
 
 
 def answer(conn, question, vector, model=None, manufacturer=None, top=TOP, language=LANGUAGE):
-    widened = []
-    hits, level, used = [], "all", language
-    for level, documents, maker in levels(conn, model, manufacturer):
-        if documents == []:
-            widened.append(level)
-            continue
-        for used in ([language, None] if language else [None]):
-            hits = search(conn, question, vector, documents, maker, top, used, model if level == "model" else None)
-            if _relevant(hits):
-                break
-        if _relevant(hits) or level == "all":
+    """D82 (user, 2026-10-29): prefer, never exclude. Every search covers all live data; the model's own manuals (and
+    its series manuals) rank first, then the brand's (shared sister-brand manuals included, Q23), then the rest. Each
+    preferred set is also searched on its own, so its sections are never crowded out of the candidates by a large
+    library. A question with a code (an error code, a part number) is brand-specific: another brand's section that
+    matches only through that code is pushed down hard (an E4 means different things to different makers).
+    level: the narrowest preference that applied (model, manufacturer, all); widened: a model with no manuals."""
+    maker = find_manufacturer(conn, manufacturer) if manufacturer else None
+    model_docs = model_documents(conn, model, maker) if model else []
+    brand_docs = brand_documents(conn, maker) if maker is not None else []
+    widened = ["model"] if model and not model_docs else []
+    level = "model" if model_docs else "manufacturer" if maker is not None else "all"
+    pools = [docs for docs in (model_docs, brand_docs) if docs] + [None]
+    own_model, own_brand, coded = set(model_docs), set(brand_docs), bool(terms(question))
+    hits, used = [], language
+    for used in ([language, None] if language else [None]):
+        best = {}
+        for documents in pools:
+            for hit in search(conn, question, vector, documents, None, top, used, model if model_docs else None):
+                weight = (PREFER_MODEL if hit.document_id in own_model else
+                          PREFER_BRAND if hit.document_id in own_brand else 1.0)
+                if coded and maker is not None and hit.document_id not in own_brand | own_model and hit.term_rank:
+                    weight *= FOREIGN_CODE
+                scored = replace(hit, score=hit.score * weight)
+                if hit.section_id not in best or scored.score > best[hit.section_id].score:
+                    best[hit.section_id] = scored
+        hits = sorted(best.values(), key=lambda h: (-h.score, h.section_id))[:top]
+        if _relevant(hits):
             break
-        widened.append(level)
     return {"level": level, "language": used, "widened": widened, "results": hits}
 
 

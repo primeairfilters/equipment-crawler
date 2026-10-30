@@ -74,7 +74,9 @@ def gap_fill(conn, client, **kwargs):
         unlock(conn, "crawler-gapfill")
 
 
-def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=MAX_SEARCHES_PER_MONTH, after_search=None):
+def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=MAX_SEARCHES_PER_MONTH, after_search=None,
+              limit=None):
+    """limit: at most this many searches in this call (the nightly run's share, P20); the monthly cap holds too."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     cap = Decimal(str(cap_usd if cap_usd is not None else os.environ.get("AI_MONTHLY_CAP_USD", DEFAULT_CAP_USD)))
     summary = {"searched": 0, "found": 0, "held_text": 0, "backed_off": 0}
@@ -105,7 +107,7 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             "AND " + HAS_NO_DOCUMENT_SQL,
             (alias_key(brand_name), alias_key(brand_name)))]
         for fam in sorted({family(k) for k in keys}):
-            if used >= max_searches:
+            if used >= max_searches or (limit is not None and summary["searched"] >= limit):
                 return summary
             last = _rows(conn, "SELECT searched_at, found FROM gapfill_searches WHERE brand_id = %s AND family = %s",
                          (brand_id, fam))
@@ -117,38 +119,59 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
                 continue
             if model is None:
                 model = ai.HAIKU if client.supports_web_search(ai.HAIKU) else ai.SONNET
-            worst = ai.cost(model, input_tokens=ASSUMED_INPUT_TOKENS, output_tokens=MAX_TOKENS, searches=1)
-            reserved = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages "
-                                     "WHERE ai_batch_id IS NOT NULL")[0][0])
-            if ai.monthly_spend(conn, now) + reserved + worst > cap:
+            done = _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now)
+            if done is None:
                 return summary
-
-            query = f"{brand_name} {fam} spec sheet or installation manual"
-            reply = client.find_documents(model, brand_name, query, hosts, 1, MAX_TOKENS)
-            answer = reply.output if isinstance(reply.output, dict) else None
-            _exec(conn,
-                  "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "
-                  "cache_write_tokens, searches, is_batch, rejected, cost_usd, created_at) "
-                  "VALUES ('gapfill', %s, NULL, %s, %s, %s, %s, %s, %s, false, %s, %s, %s)",
-                  (brand_id, model, reply.input_tokens, reply.output_tokens, reply.cache_read_tokens,
-                   reply.cache_write_tokens, reply.searches, answer is None,
-                   ai.cost(model, reply.input_tokens, reply.output_tokens, searches=reply.searches), now))
-            used += max(reply.searches, 1)
+            used += done[1]
             summary["searched"] += 1
-
-            stored = 0
-            for entry in (answer or {}).get("documents", []) if isinstance(answer, dict) and isinstance(
-                    answer.get("documents"), list) else []:
-                url = _clean_url(entry.get("url")) if isinstance(entry, dict) else None
-                if url is None or not in_scope(url, list(hosts)):
-                    continue
-                _exec(conn, "INSERT INTO start_urls (brand_id, url, url_sha, found_by) VALUES (%s, %s, %s, 'discover') "
-                            "ON CONFLICT (brand_id, url_sha) DO NOTHING", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
-                stored += 1
-            summary["found"] += 1 if stored else 0
-            _exec(conn, "INSERT INTO gapfill_searches (brand_id, family, searched_at, found) VALUES (%s, %s, %s, %s) "
-                        "ON CONFLICT (brand_id, family) DO UPDATE SET searched_at = EXCLUDED.searched_at, found = EXCLUDED.found",
-                  (brand_id, fam, now, bool(stored)))
+            summary["found"] += 1 if done[0] else 0
             if after_search:
                 after_search()
     return summary
+
+
+def search_family(conn, client, brand_id, fam, *, now=None, cap_usd=None, purpose="gapfill"):
+    """One search for one family of the brand (a Breeze miss on a model with no manual, P21). Returns how many
+    documents it queued, or None when it could not search (no approved host, the monthly cap)."""
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    cap = Decimal(str(cap_usd if cap_usd is not None else os.environ.get("AI_MONTHLY_CAP_USD", DEFAULT_CAP_USD)))
+    name = _rows(conn, "SELECT name FROM brands WHERE id = %s", (brand_id,))[0][0]
+    hosts = tuple(sorted(r[0] for r in _rows(
+        conn, "SELECT host FROM brand_domains WHERE brand_id = %s AND status = 'approved'", (brand_id,))))
+    if not hosts:
+        return None
+    model = ai.HAIKU if client.supports_web_search(ai.HAIKU) else ai.SONNET
+    done = _search(conn, client, model, brand_id, name, fam, hosts, cap, now, purpose)
+    return None if done is None else done[0]
+
+
+def _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now, purpose="gapfill"):
+    """(documents queued, searches used) for one family, or None at the monthly cap."""
+    worst = ai.cost(model, input_tokens=ASSUMED_INPUT_TOKENS, output_tokens=MAX_TOKENS, searches=1)
+    reserved = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages "
+                             "WHERE ai_batch_id IS NOT NULL")[0][0])
+    if ai.monthly_spend(conn, now) + reserved + worst > cap:
+        return None
+    query = f"{brand_name} {fam} spec sheet or installation manual"
+    reply = client.find_documents(model, brand_name, query, hosts, 1, MAX_TOKENS)
+    answer = reply.output if isinstance(reply.output, dict) else None
+    _exec(conn,
+          "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "
+          "cache_write_tokens, searches, is_batch, rejected, cost_usd, created_at) "
+          "VALUES (%s, %s, NULL, %s, %s, %s, %s, %s, %s, false, %s, %s, %s)",
+          (purpose, brand_id, model, reply.input_tokens, reply.output_tokens, reply.cache_read_tokens,
+           reply.cache_write_tokens, reply.searches, answer is None,
+           ai.cost(model, reply.input_tokens, reply.output_tokens, searches=reply.searches), now))
+    stored = 0
+    for entry in (answer or {}).get("documents", []) if isinstance(answer, dict) and isinstance(
+            answer.get("documents"), list) else []:
+        url = _clean_url(entry.get("url")) if isinstance(entry, dict) else None
+        if url is None or not in_scope(url, list(hosts)):
+            continue
+        _exec(conn, "INSERT INTO start_urls (brand_id, url, url_sha, found_by) VALUES (%s, %s, %s, 'gapfill') "
+                    "ON CONFLICT (brand_id, url_sha) DO NOTHING", (brand_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest()))
+        stored += 1
+    _exec(conn, "INSERT INTO gapfill_searches (brand_id, family, searched_at, found) VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (brand_id, family) DO UPDATE SET searched_at = EXCLUDED.searched_at, found = EXCLUDED.found",
+          (brand_id, fam, now, bool(stored)))
+    return stored, max(reply.searches, 1)

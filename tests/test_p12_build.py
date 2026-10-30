@@ -322,6 +322,28 @@ def test_check_does_not_count_a_hidden_manual_as_live_without_sections(runtime_c
     assert doc not in check(runtime_conn)["live_without_sections"]
 
 
+def test_a_manual_retagged_not_equipment_is_not_live_without_sections(runtime_conn):
+    # run 4, 2026-10-30: doc 1339 (a refrigerant regulation letter) left Breeze as not_equipment, as it should, but
+    # check and the parse-issue scan both listed it as a live manual with no live sections
+    from crawler.issues import scan
+    from crawler.kb import build, check, publish
+    from crawler.store import save_document
+    from p3support import make_doc
+    name, brand_id = new_brand(runtime_conn)
+    page_id = make_doc(runtime_conn, brand_id, ["Regulation letter"])
+    sha = q(runtime_conn, "SELECT content_sha FROM pages WHERE id = %s", (page_id,))[0][0]
+    doc = save_document(runtime_conn, brand_id=brand_id, page_id=page_id, source_url="http://x", title="t", content_sha=sha,
+                        models=[], extracted_by="rules", doc_type="install_manual", tags={"trade": "hvac"})
+    build(runtime_conn, doc, pages=PAGES)
+    publish(runtime_conn, doc)
+    save_document(runtime_conn, brand_id=brand_id, page_id=page_id, source_url="http://x", title="t", content_sha=sha,
+                  models=[], extracted_by="rules", doc_type="not_equipment", tags={"trade": "other"})
+    assert doc not in check(runtime_conn)["live_without_sections"]
+    scan(runtime_conn)
+    assert q(runtime_conn, "SELECT COUNT(*) FROM parse_issues WHERE document_id = %s AND kind = 'no_sections'",
+             (doc,))[0][0] == 0
+
+
 def test_a_section_flagged_with_its_own_language_keeps_it_through_a_retag(runtime_conn, monkeypatch):
     import crawler.kb
     from crawler.kb import build

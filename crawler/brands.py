@@ -49,12 +49,17 @@ def add_brand(conn, name):
     name = " ".join(name.split())
     if not name:
         raise ValueError("A brand needs a name.")
-    return _rows(
+    brand_id = _rows(
         conn,
         "INSERT INTO brands (name, name_key) VALUES (%s, %s) "
         "ON CONFLICT (name_key) DO UPDATE SET name_key = EXCLUDED.name_key RETURNING id",
         (name, brand_key(name)),
     )[0][0]
+    # the admin page lists every brand (P19): a brand added here gets its row there, or is linked to the page's own
+    _exec(conn, "INSERT INTO control.brands (name, added_by, crawl_brand_id) VALUES (%s, 'command line', %s) "
+                "ON CONFLICT (name_key) DO UPDATE SET crawl_brand_id = COALESCE(control.brands.crawl_brand_id, "
+                "EXCLUDED.crawl_brand_id)", (name, brand_id))
+    return brand_id
 
 
 def add_start_url(conn, brand_name, url, depth=None, kind="page"):
@@ -152,11 +157,26 @@ def list_keywords(conn, effect):
                        "ORDER BY k.source DESC, k.keyword", (effect,))
 
 
+def set_active(conn, brand_id, active):
+    """A brand and its start addresses run (active) or are stopped. The admin page's pause reaches here (P19)."""
+    if active:
+        _exec(conn, "UPDATE brands SET status = 'active' WHERE id = %s", (brand_id,))
+        _exec(conn, "UPDATE start_urls SET status = 'active' WHERE brand_id = %s AND status = 'stopped'", (brand_id,))
+    else:
+        _exec(conn, "UPDATE brands SET status = 'stopped' WHERE id = %s", (brand_id,))
+        _exec(conn, "UPDATE start_urls SET status = 'stopped' WHERE brand_id = %s", (brand_id,))
+
+
+def _page_state(conn, brand_id, state):
+    """`stop` and `resume` on the command line show on the admin page too, so the next run does not undo them."""
+    _exec(conn, "UPDATE control.brands SET state = %s WHERE crawl_brand_id = %s", (state, brand_id))
+
+
 def stop(conn, target):
     brand_id = find_brand(conn, target)
     if brand_id is not None:
-        _exec(conn, "UPDATE brands SET status = 'stopped' WHERE id = %s", (brand_id,))
-        _exec(conn, "UPDATE start_urls SET status = 'stopped' WHERE brand_id = %s", (brand_id,))
+        set_active(conn, brand_id, False)
+        _page_state(conn, brand_id, "paused")
         return "brand"
     try:
         host = normalize_host(target)
@@ -172,8 +192,8 @@ def resume(conn, target):
     """Undo stop: a brand and its stopped start addresses go back to active; a stopped host is approved again (as ok)."""
     brand_id = find_brand(conn, target)
     if brand_id is not None:
-        _exec(conn, "UPDATE brands SET status = 'active' WHERE id = %s", (brand_id,))
-        _exec(conn, "UPDATE start_urls SET status = 'active' WHERE brand_id = %s AND status = 'stopped'", (brand_id,))
+        set_active(conn, brand_id, True)
+        _page_state(conn, brand_id, "active")
         return "brand"
     try:
         host = normalize_host(target)

@@ -141,7 +141,26 @@ class _StartCrawl:
         self.max_pages, self.after_page, self.summary = max_pages, after_page, summary
         self.prefix = feed_prefix(self.start_url) if kind == "feed" else None
         self.approved = fetcher._approved(brand_id)
+        self._limits()
         self.heap, self.order = [], 0
+        self.search_hosts = set()  # hosts whose search form is already kept
+
+    def _limits(self):
+        """Hosts the crawler approved itself (P18): PDFs only, and while on trial only the trial's PDFs."""
+        from crawler.hostjudge import trials
+        self.pdf_only = {r[0] for r in _rows(self.conn, "SELECT host FROM brand_domains WHERE brand_id = %s "
+                                                        "AND status = 'approved' AND scope = 'pdf'", (self.brand_id,))}
+        self.trial = trials(self.conn, self.brand_id)
+
+    def _held_back(self, url, row_id=None):
+        """True for a link a PDF-only host may not give: its web pages, or a PDF outside its trial."""
+        try:
+            host = normalize_host(urlsplit(url).hostname or "")
+        except ValueError:
+            return False
+        if host in self.pdf_only and not is_pdf_link(url):
+            return True
+        return host in self.trial and row_id not in self.trial[host]
 
     # ------------------------------------------------------------ the frontier
 
@@ -180,10 +199,12 @@ class _StartCrawl:
         if set(approved) <= set(self.approved):
             return False
         self.approved, queued = approved, False
+        self._limits()
         for row_id, url, depth, parent_id in _rows(
                 self.conn, "SELECT id, url, depth, parent_id FROM pages WHERE brand_id = %s AND fetch_state = 'out_of_scope' "
                            "ORDER BY id", (self.brand_id,)):
-            if in_scope(url, approved) and (depth or 0) <= self.max_depth and _seen_key(url) not in self.seen:
+            if (in_scope(url, approved) and (depth or 0) <= self.max_depth and _seen_key(url) not in self.seen
+                    and not self._held_back(url, row_id)):
                 _rows(self.conn, "UPDATE pages SET fetch_state = 'queued' WHERE id = %s", (row_id,))
                 self.push(url, depth or 0, parent_id, "page", PDF_FIRST)
                 queued = True
@@ -232,6 +253,7 @@ class _StartCrawl:
                     else:
                         links = extract_links(result.body, result.url)
                         context = page_context(result.body, result.url)
+                        self._search_form(result.url or url, result.body)
             elif result.outcome == "not_modified":
                 if result.is_pdf and result.body:
                     record_pdf(self.conn, self.brand_id, page_id, url, result.body)
@@ -244,6 +266,16 @@ class _StartCrawl:
         if due and self.after_page is not None:
             self.after_page()  # once per page read, after its links are recorded, so a stop mid-run keeps them
         return attempted
+
+    def _search_form(self, url, body):
+        """The first search form on each of the brand's hosts is kept for site search (P20, crawler/coverage.py)."""
+        host = (urlsplit(url).hostname or "").lower()
+        if host in self.search_hosts:
+            return
+        from crawler.coverage import record_search_form
+        if record_search_form(self.conn, self.brand_id, url, body) or _rows(
+                self.conn, "SELECT 1 FROM site_search_templates WHERE brand_id = %s AND host = %s", (self.brand_id, host)):
+            self.search_hosts.add(host)
 
     def _known_children(self, page_id):
         """The links already recorded on this page, so a page that is not read again still leads to its children."""
@@ -307,6 +339,13 @@ class _StartCrawl:
                         continue  # an address with no usable host name: nothing to record
                     self._link(from_id, row[0], text)
                 continue
+            if self._held_back(url):  # a web page of a PDF-only host, or a PDF of a host on trial
+                if not is_pdf_link(url):
+                    continue
+                row = self._row(url, depth, from_id, state="out_of_scope")
+                if self._held_back(url, row[0]):  # not one of the trial's PDFs: it waits, still out of scope
+                    self._link(from_id, row[0], text)
+                    continue
             row = self._row(url, depth, from_id)
             row_id, _, stored_decision, decided_by, fetched, url = row
             self._link(from_id, row_id, text)

@@ -70,23 +70,27 @@ def docs(result):
     return [h.document_id for h in result["results"]]
 
 
-def test_a_model_narrows_to_its_own_manuals_and_its_series_manual(runtime_conn, library):
+def test_a_model_ranks_its_own_manuals_and_its_series_manual_first(runtime_conn, library):
+    # D82 (user, 2026-10-29): prefer, never exclude. The other maker's twin is still there, after the model's own
     from crawler.search import ask, model_documents
     assert model_documents(runtime_conn, "RA15AZ24AJ3CA") == sorted([library["series"], library["model"]])
     result = ask(runtime_conn, BagEmbedder(), "how do I check subcooling", model="RA15AZ24AJ3CA", cap_usd=5)
-    assert result["level"] == "model" and docs(result) == [library["series"]]  # the other maker's twin is left out
+    assert result["level"] == "model" and docs(result)[0] == library["series"]
+    assert library["other"] in docs(result)
 
 
-def test_a_partial_model_number_finds_the_manuals_of_the_models_it_starts(runtime_conn, library):
+def test_a_partial_model_number_ranks_the_manuals_of_the_models_it_starts_first(runtime_conn, library):
     from crawler.search import ask
     result = ask(runtime_conn, BagEmbedder(), "error code list", model="RA15AZ24", cap_usd=5)
-    assert result["level"] == "model" and library["model"] in docs(result) and library["other"] not in docs(result)
+    assert result["level"] == "model" and docs(result)[0] == library["model"]
 
 
-def test_a_manufacturer_narrows_to_its_manuals(runtime_conn, library):
+def test_a_manufacturer_ranks_its_manuals_first_and_keeps_the_rest(runtime_conn, library):
     from crawler.search import ask
     result = ask(runtime_conn, BagEmbedder(), "how do I check subcooling", manufacturer="Ruudtest", cap_usd=5)
-    assert result["level"] == "manufacturer" and library["other"] not in docs(result)
+    found = docs(result)
+    assert result["level"] == "manufacturer" and found[0] == library["series"]
+    assert library["other"] in found and found.index(library["other"]) > found.index(library["series"])
 
 
 def test_with_neither_everything_is_searched(runtime_conn, library):
@@ -95,12 +99,47 @@ def test_with_neither_everything_is_searched(runtime_conn, library):
     assert result["level"] == "all" and {library["series"], library["other"]} <= set(docs(result))
 
 
-def test_an_unknown_model_widens_to_the_manufacturer(runtime_conn, library):
+def test_an_unknown_model_falls_back_to_preferring_the_manufacturer(runtime_conn, library):
     from crawler.search import ask
     result = ask(runtime_conn, BagEmbedder(), "how do I check subcooling", model="ZZ99999", manufacturer="Ruudtest",
                  cap_usd=5)
     assert result["level"] == "manufacturer" and result["widened"] == ["model"]
-    assert library["series"] in docs(result)
+    assert docs(result)[0] == library["series"]
+
+
+def test_an_answer_only_in_another_brands_manual_is_found_for_a_brand_question(runtime_conn, library, monkeypatch):
+    # "I dont want a situation where they are working on a Ruud but because a document is not listed as part of Ruud it
+    # doesnt answer" (user, 2026-10-29)
+    from crawler.embed import embed_pass
+    from crawler.search import ask
+    other, _ = manual(runtime_conn, monkeypatch, topic("Nitrogen Pressure Test", "nitrogen",
+                                                       "Pressurize the line set with dry nitrogen to 550 psi."),
+                      brand_name="Othertest")
+    embed_pass(runtime_conn, BagEmbedder(), cap_usd=5)
+    result = ask(runtime_conn, BagEmbedder(), "nitrogen pressure test on the line set", manufacturer="Ruudtest",
+                 cap_usd=5)
+    assert docs(result)[0] == other
+
+
+def test_an_error_code_from_another_brand_never_beats_the_brands_own(runtime_conn, library, monkeypatch):
+    from crawler.embed import embed_pass
+    from crawler.search import ask
+    for n in range(3):  # another maker with its own E4, worded closer to the question
+        manual(runtime_conn, monkeypatch, topic("Error Codes E4", f"fault{n}x", "What does error E4 mean: E4 means the "
+                                                "high pressure switch opened. Error E4. Code E4."), brand_name="Othertest")
+    embed_pass(runtime_conn, BagEmbedder(), cap_usd=5)
+    result = ask(runtime_conn, BagEmbedder(), "what does error E4 mean", manufacturer="Ruudtest", cap_usd=5)
+    assert docs(result)[0] == library["model"]  # Ruudtest's own E4 (LO PS), not the other maker's
+
+
+def test_a_manual_shared_by_two_brands_ranks_as_each_brands_own(runtime_conn, library):
+    # Q23: Ruud and Rheem publish the same PDFs; a manual found under both belongs to both
+    from crawler.search import ask
+    from crawler.store import manufacturer_for
+    q(runtime_conn, "INSERT INTO document_brands (document_id, manufacturer_id) VALUES (%s, %s)",
+      (library["other"], manufacturer_for(runtime_conn, "Ruudtest")))
+    result = ask(runtime_conn, BagEmbedder(), "how do I check subcooling", manufacturer="Ruudtest", cap_usd=5)
+    assert set(docs(result)[:2]) == {library["series"], library["other"]}
 
 
 def test_full_text_and_codes_find_an_error_code_that_meaning_search_alone_misses(runtime_conn, library):
@@ -413,6 +452,29 @@ def test_the_equipment_a_question_names_is_read_from_its_words():
     assert equipment_types("RTU economizer wiring on the rooftop unit") == ["packaged_unit"]
     assert equipment_types("How do I wire a heat pump to the Sky-35 controller?") == ["heat_pump", "thermostat_control"]
     assert equipment_types("What micron level should I pull the vacuum down to?") == []
+
+
+def test_every_trade_has_equipment_words():
+    # D83: the boost covers every Tracforce trade, not only HVAC
+    from crawler.search import equipment_types
+    assert equipment_types("Pool pump won't prime after cleaning the pool filter") == ["pool_filter", "pool_pump"]
+    assert equipment_types("Standby generator fails to start, transfer switch clicking") == ["generator", "transfer_switch"]
+    assert equipment_types("Garage door opener light blinks 3 times") == ["garage_door_opener"]
+    assert equipment_types("Water softener regeneration cycle settings") == ["water_softener"]
+    assert equipment_types("Ice machine making thin ice") == ["ice_machine"]
+    assert equipment_types("Washer shows error F21") == ["washer"]
+    assert equipment_types("Breaker keeps tripping in the main panel") == ["panel_breaker"]
+    assert equipment_types("Walk-in cooler evaporator fan not running") == ["walk_in"]
+    assert equipment_types("Pool heater shows HF code") == ["pool_heater"]
+    assert equipment_types("Salt water generator cell cleaning") == ["pool_chlorinator"]  # not a generator
+    assert equipment_types("Pressure range on the furnace gas valve") == ["furnace"]  # "range" alone is not an oven
+    assert equipment_types("Remove the access panel on the air handler") == ["air_handler"]  # nor "panel" a breaker panel
+
+
+def test_every_equipment_word_names_a_known_type():
+    from crawler.extract import EQUIPMENT_TYPES
+    from crawler.search import EQUIPMENT_WORDS
+    assert {t for _, types in EQUIPMENT_WORDS for t in types} <= set(EQUIPMENT_TYPES)
 
 
 def typed(conn, monkeypatch, equipment, pages, brand_name):

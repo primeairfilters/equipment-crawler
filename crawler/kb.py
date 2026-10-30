@@ -12,12 +12,9 @@ D56).
 
 Nothing here deletes a row. Callers commit.
 """
-import hashlib
-import os
 import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 from crawler import library, textextract
 from crawler.brands import UnknownTarget
@@ -48,9 +45,7 @@ def build_version():
     """What a build is stamped with: the sectioner's version and a key for everything that reads the PDF (the layout
     reader with its library versions, the OCR reader, textextract.py's own code), so a change to any of them makes
     `sections` take every document again (one whose sections come out the same only takes the new stamp)."""
-    readers = "|".join((textextract._layout_reader(), textextract._ocr_reader(),
-                        hashlib.sha256(Path(textextract.__file__).read_bytes()).hexdigest()))
-    return f"{SECTIONER_VERSION}/{hashlib.sha256(readers.encode()).hexdigest()[:8]}"
+    return f"{SECTIONER_VERSION}/{textextract.reader_version()[:8]}"
 
 
 def document_pages(conn, document_id, problems=None, original=None):
@@ -81,10 +76,9 @@ NO_ORIGINAL = object()  # read_original: the library does not have the PDF
 def read_original(sha, page_count):
     """The PDF's layout from the library, the ExtractError when it could not be read, or NO_ORIGINAL. Needs no database,
     so several can run at once. The time limit grows with the page count (a 69-page capacity chart takes about 140 s)."""
-    if not (library.configured() and library.has_file(sha)):
+    data = library.read(sha) if library.configured() else None
+    if data is None:
         return NO_ORIGINAL
-    with open(os.path.join(os.environ["DOCS_DIR"], f"{sha}.pdf"), "rb") as handle:
-        data = handle.read()
     try:
         return extract_layout(data, timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)))
     except ExtractError as exc:
@@ -397,6 +391,15 @@ def not_duplicates(conn, one, two, *, reason, by_whom="user"):
 
 # ---------------------------------------------------------------- check
 
+def _missing_originals(conn):
+    """Live documents whose original PDF is not in the library (S3 or the local folder): they cannot be rebuilt."""
+    if not library.configured():
+        return []
+    stored = library.stored_keys()
+    return [d for d, sha in _rows(conn, "SELECT id, content_sha FROM documents WHERE state = 'live' ORDER BY id")
+            if f"{sha}.pdf" not in stored]
+
+
 DUPLICATE_OVERLAP = 0.6  # Ruud 2026-10-29: real pairs share 0.64-0.99 of their text, a shared generic title 0.29-0.52
 
 
@@ -415,7 +418,8 @@ def check(conn):
     """Read only. Problems (document ids) and counts of live documents and sections per manufacturer and trade."""
     return {
         "live_without_sections": [r[0] for r in _rows(
-            conn, "SELECT d.id FROM documents d WHERE d.state = 'live' AND d.hidden_at IS NULL AND NOT EXISTS "
+            conn, "SELECT d.id FROM documents d WHERE d.state = 'live' AND d.hidden_at IS NULL "
+                  "AND d.doc_type IS DISTINCT FROM 'not_equipment' AND NOT EXISTS "
                   "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.is_live) ORDER BY d.id")],
         "hidden_but_live": [r[0] for r in _rows(
             conn, "SELECT DISTINCT s.document_id FROM sections s JOIN documents d ON d.id = s.document_id "
@@ -433,6 +437,7 @@ def check(conn):
                   "ORDER BY 1, 2") if _shared_text(conn, *r) >= DUPLICATE_OVERLAP],
         "marked_different": _rows(conn, "SELECT COUNT(*) FROM not_duplicates")[0][0],
         "needs_ocr": _rows(conn, "SELECT COUNT(*) FROM documents WHERE needs_ocr")[0][0],
+        "missing_originals": _missing_originals(conn),
         "user_tags": [(r[0], {field: r[1][field] for field in r[2]}) for r in _rows(  # set by hand: easy to review
             conn, "SELECT id, json_build_object('doc_type', doc_type, 'equipment_type', equipment_type, 'trade', trade), "
                   "user_tags FROM documents WHERE user_tags <> '{}' ORDER BY id")],

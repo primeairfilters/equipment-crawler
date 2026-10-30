@@ -35,7 +35,11 @@ _CELL_TAGS = {"td", "th"}
 
 
 class ExtractError(Exception):
-    pass
+    """detail: the reader's own last words (its stderr), for the parse issue a fix starts from."""
+
+    def __init__(self, message, detail=None):
+        super().__init__(message)
+        self.detail = detail
 
 
 @dataclass
@@ -44,6 +48,8 @@ class Extracted:
     title: str = None
     drawn_text: bool = False  # text drawn as shapes: the pages with drawn lines are left empty (drawn_pages)
     ocr_pages: set = field(default_factory=set)  # page indexes whose text came from OCR
+    page_total: int = None  # the PDF's own page count; more than len(pages) when it was cut at max_pages
+    left_out: set = field(default_factory=set)  # page indexes OCR read as Spanish or French, left empty (English only)
 
 
 def clean(text):
@@ -151,6 +157,13 @@ def _layout_reader():
     return f"{code}/pdfplumber {version('pdfplumber')}/pypdfium2 {version('pypdfium2')}"
 
 
+def reader_version():
+    """Everything that reads a PDF's text: the layout reader, the OCR reader and this file. A parse issue of the
+    reader is taken again when this changes (crawler/issues.py)."""
+    readers = "|".join((_layout_reader(), _ocr_reader(), hashlib.sha256(Path(__file__).read_bytes()).hexdigest()))
+    return hashlib.sha256(readers.encode()).hexdigest()[:12]
+
+
 def _ocr_reader():
     """What kept OCR results depend on: OCR_VERSION and ocrchild.py's code. Any change reads scanned pages again."""
     code = hashlib.sha256(Path(__file__).with_name("ocrchild.py").read_bytes()).hexdigest()[:16]
@@ -208,15 +221,18 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
     raw = _run_child(data, [str(max_pages)], timeout, memory)
     blank = drawn_pages(raw.get("rows"))
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
-    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text or caption_only(text)], memory)
+    left_out = set()
+    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text or caption_only(text)], memory,
+                     left_out=left_out)
     for n, lines in read.items():
         pages[n] = clean("\n".join([pages[n]] + [line["text"] for line in _added(lines, pages[n].splitlines())]))
-    return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read))
+    return Extracted(pages=pages, title=None, drawn_text=bool(blank), ocr_pages=set(read),
+                     page_total=raw.get("page_total"), left_out=left_out)
 
 
-def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
+def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False, left_out=None):
     """{page index: [line, ...]} for the pages OCR could read in English (user, 2026-10-28: English only; a page that
-    reads as Spanish or French is left out). Nothing when Tesseract is not installed or OCR fails. Results are kept in
+    reads as Spanish or French is left out, and its index added to the left_out set when one is given). Nothing when Tesseract is not installed or OCR fails. Results are kept in
     the library (DOCS_DIR/.ocr/<sha>.json), so `reread` and `sections` read a page once. When the reader fails on a
     set of pages, each is read alone; a page that fails alone is kept as empty for this reader (_ocr_reader)."""
     import shutil
@@ -255,8 +271,12 @@ def ocr_pages(data, indexes, memory=PDF_MEMORY_BYTES, strict=False):
     out = {}
     for n in indexes:
         lines = [line for line in cache.get(str(n), []) if clean(line.get("text", ""))]
-        if lines and _language(" ".join(line["text"] for line in lines)) not in ("es", "fr"):
+        if not lines:
+            continue
+        if _language(" ".join(line["text"] for line in lines)) not in ("es", "fr"):
             out[n] = lines
+        elif left_out is not None:
+            left_out.add(n)
     return out
 
 
@@ -329,16 +349,18 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
     with _running_lock:
         _running.add(proc)
     try:
-        out, _ = proc.communicate(data, timeout=timeout)
+        out, err = proc.communicate(data, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.communicate()
-        raise ExtractError("the PDF took too long to read") from exc
+        raise ExtractError("the PDF took too long to read", f"{child.name}: over {timeout} seconds") from exc
     finally:
         with _running_lock:
             _running.discard(proc)
     if proc.returncode != 0:
-        raise ExtractError("could not read the PDF")
+        tail = err.decode("utf-8", "replace").strip()[-1500:] if err else ""
+        raise ExtractError("could not read the PDF", f"{child.name} exit {proc.returncode}: {tail}" if tail
+                           else f"{child.name} exit {proc.returncode} (killed: memory limit or a crash)")
     if len(out) > PDF_MAX_OUTPUT_BYTES:
         raise ExtractError("the PDF has too much text")
     try:
@@ -387,17 +409,27 @@ def index_page(conn, page_id, body, *, is_pdf, found=None):
     if found is None:
         try:
             found = extract_pdf(body) if is_pdf else extract_html(body)
-        except ExtractError:
+        except ExtractError as exc:
             _exec(conn, "UPDATE pages SET extraction_status = 'failed' WHERE id = %s", (page_id,))
+            if is_pdf:
+                from crawler import issues
+                issues.record(conn, hashlib.sha256(body).hexdigest(), "unreadable",
+                              {"error": str(exc), "reader said": exc.detail, "bytes": len(body), "page_id": page_id})
             return
     texts = found.pages
+    if is_pdf and found.page_total and found.page_total > len(texts):
+        from crawler import issues
+        issues.record(conn, hashlib.sha256(body).hexdigest(), "cut_at_page_limit",
+                      {"pages_in_pdf": found.page_total, "pages_read": len(texts), "limit": PDF_MAX_PAGES,
+                       "bytes": len(body)})
     for number, text in enumerate(texts, start=1):
         _exec(conn,
-              "INSERT INTO page_text (page_id, page_number, title, text_sha, body, has_text) VALUES (%s, %s, %s, %s, %s, %s) "
+              "INSERT INTO page_text (page_id, page_number, title, text_sha, body, has_text, left_out) "
+              "VALUES (%s, %s, %s, %s, %s, %s, %s) "
               "ON CONFLICT (page_id, page_number) DO UPDATE SET title = EXCLUDED.title, text_sha = EXCLUDED.text_sha, "
-              "body = EXCLUDED.body, has_text = EXCLUDED.has_text",
+              "body = EXCLUDED.body, has_text = EXCLUDED.has_text, left_out = EXCLUDED.left_out",
               (page_id, number, (found.title or "")[:500] or None, hashlib.sha256(text.encode("utf-8")).hexdigest(), text,
-               has_text(text)))
+               has_text(text), "language" if number - 1 in found.left_out and not has_text(text) else None))
     chosen = extract.pick_pages(texts) if is_pdf else []  # only PDFs are read by the AI
     if not chosen:
         status = "skipped"
