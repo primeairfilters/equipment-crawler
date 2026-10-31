@@ -1,5 +1,6 @@
-# The crawler on the prod server (EQUIPMENT_DATA_CRAWLER.md D86, P22). Used instead of docker-compose.yml there:
-#   export COMPOSE_FILE=docker-compose.prod.yml   (then ./crawl works as on the Mac)
+# The crawler on the prod server (EQUIPMENT_DATA_CRAWLER.md D86, P22). Used instead of docker-compose.yml there,
+# chosen by a .env file in this folder on the server holding COMPOSE_FILE=docker-compose.prod.yml (gitignored), so
+# ./crawl and setup/ work as on the Mac. Not an export in the shell: that would change ~/HVACApp's compose too.
 # Differences from the Mac's file: no published port (PostgreSQL is reached only on the Docker network, where
 # Tracforce's admin-app joins it as host `pg`), originals in S3 only (aws.env sets DOCS_BUCKET), the rebuildable
 # caches in a named volume instead of a Mac folder, and memory caps sized so a heavy night stops the crawler,
