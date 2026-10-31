@@ -16,4 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr t
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# The caches folder (DOCS_DIR). On prod it is a named volume, which takes this owner when first made (P22).
+RUN mkdir -p /docs && chown crawler:crawler /docs
+
 USER crawler

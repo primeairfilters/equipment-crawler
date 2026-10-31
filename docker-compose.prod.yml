@@ -1,0 +1,60 @@
+# The crawler on the prod server (EQUIPMENT_DATA_CRAWLER.md D86, P22). Used instead of docker-compose.yml there:
+#   export COMPOSE_FILE=docker-compose.prod.yml   (then ./crawl works as on the Mac)
+# Differences from the Mac's file: no published port (PostgreSQL is reached only on the Docker network, where
+# Tracforce's admin-app joins it as host `pg`), originals in S3 only (aws.env sets DOCS_BUCKET), the rebuildable
+# caches in a named volume instead of a Mac folder, and memory caps sized so a heavy night stops the crawler,
+# never the app (measured 2026-10-30: crawler 390 MiB, pg 204 MiB at peak on a 77-page scan).
+# Secrets live in ~/.config/tracforce-crawler/ on the server, never here.
+name: equipment-crawler
+
+services:
+  pg:
+    image: pgvector/pgvector:0.8.7-pg18
+    env_file:
+      - ${HOME}/.config/tracforce-crawler/pg-root.env
+    command: ["postgres", "-c", "default_toast_compression=lz4", "-c", "timezone=UTC"]
+    volumes:
+      - eq-pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crawler-net
+
+  crawler:
+    build: .
+    env_file:
+      - ${HOME}/.config/tracforce-crawler/pg.env
+      - ${HOME}/.config/tracforce-crawler/aws.env
+      - path: ${HOME}/.config/tracforce-crawler/anthropic.env
+        required: false
+      - path: ${HOME}/.config/tracforce-crawler/openai.env
+        required: false
+    volumes:
+      - .:/work:ro
+      - eq-docs-cache:/docs
+    environment:
+      DOCS_DIR: /docs
+    working_dir: /work
+    mem_limit: 1536m
+    pids_limit: 256
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      pg:
+        condition: service_healthy
+    networks:
+      - crawler-net
+
+volumes:
+  eq-pg-data:
+  eq-docs-cache:
+
+networks:
+  crawler-net:
