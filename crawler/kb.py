@@ -225,7 +225,11 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
                     "AND p.brand_id = %s) " if brand_id else "")
                  + "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s "
                    "AND s.build = (SELECT MAX(l.build) FROM sections l WHERE l.document_id = d.id)) "  # the latest build
-                 "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (build_version(),))
+                 # a live manual this reader already failed on keeps its build: not read again every night, only
+                 # once the reader changes (issues.retry) or the problem is reopened
+                 "AND NOT EXISTS (SELECT 1 FROM parse_issues i WHERE i.document_id = d.id AND i.kind = 'unreadable' "
+                 "AND i.state IN ('open', 'wont_fix') AND i.seen_version = %s AND i.detail ? 'live_build_kept') "
+                 "ORDER BY d.id", ((brand_id,) if brand_id else ()) + (build_version(), textextract.reader_version()))
     summary = {"built": 0, "unchanged": 0, "kept": [], "live": 0, "held": 0, "empty": 0, "fallback": []}
     held = _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'built' AND EXISTS "
                        "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.sectioner_version = %s "
@@ -271,6 +275,11 @@ def _build_one(conn, document_id, original, summary):
     if live and isinstance(original, ExtractError):
         # the stored text has no headings or tables: never put it over a good live build
         summary["kept"].append((document_id, str(original)))
+        # and say so: an open reader problem (Parse issues, the nightly report), so it is not silently read every night
+        from crawler import issues
+        sha = _rows(conn, "SELECT content_sha FROM documents WHERE id = %s", (document_id,))[0][0]
+        issues.record(conn, sha, "unreadable", {"error": str(original), "reader said": original.detail,
+                                                "live_build_kept": True}, document_id=document_id)
         return
     number = build(conn, document_id, problems=summary["fallback"], original=original)
     if number is not None:

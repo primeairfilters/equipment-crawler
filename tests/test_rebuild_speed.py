@@ -168,6 +168,53 @@ def test_a_live_document_whose_pdf_cannot_be_read_now_keeps_its_live_build(runti
     assert (doc, "OCR took too long") in summary["kept"] and summary["fallback"] == []
 
 
+def test_a_live_document_whose_pdf_cannot_be_read_now_is_a_parse_issue_with_the_readers_error(runtime_conn, tmp_path,
+                                                                                               monkeypatch):
+    """Prod run 5 (2026-10-31): documents 75, 1093 and 1067 kept their live builds with nothing anywhere saying why.
+    The failed read is now an open reader problem (Parse issues, the nightly report, the Claude download)."""
+    import crawler.kb
+    from crawler.kb import build_and_publish
+    from crawler.textextract import ExtractError, reader_version
+    doc = live_with_a_library_file(runtime_conn, tmp_path, monkeypatch)
+
+    def too_slow(data, **kwargs):
+        raise ExtractError("the PDF took too long to read", "layout: over 180 seconds")
+
+    monkeypatch.setattr(crawler.kb, "extract_layout", too_slow)
+    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")
+    build_and_publish(runtime_conn)
+    rows = q(runtime_conn, "SELECT kind, component, state, document_id, seen_version, detail FROM parse_issues "
+                           "WHERE content_sha = %s", ("e" * 64,))
+    assert len(rows) == 1
+    kind, component, state, document_id, seen, detail = rows[0]
+    assert (kind, component, state, document_id, seen) == ("unreadable", "reader", "open", doc, reader_version())
+    assert detail["error"] == "the PDF took too long to read" and detail["reader said"] == "layout: over 180 seconds"
+    assert detail["live_build_kept"] is True
+
+
+def test_a_kept_document_is_not_read_again_each_night_until_the_reader_changes(runtime_conn, tmp_path, monkeypatch):
+    import crawler.kb
+    import crawler.textextract
+    from crawler.kb import build_and_publish
+    from crawler.textextract import ExtractError
+    doc = live_with_a_library_file(runtime_conn, tmp_path, monkeypatch)
+    reads = []
+
+    def too_slow(data, **kwargs):
+        reads.append(1)
+        raise ExtractError("the PDF took too long to read")
+
+    monkeypatch.setattr(crawler.kb, "extract_layout", too_slow)
+    monkeypatch.setattr(crawler.kb, "SECTIONER_VERSION", "test-next")
+    build_and_publish(runtime_conn)
+    assert len(reads) == 1
+    second = build_and_publish(runtime_conn)  # the next night, same reader: not read again
+    assert len(reads) == 1 and doc not in [d for d, _ in second["kept"]]
+    monkeypatch.setattr(crawler.textextract, "_layout_reader", lambda: "a newer reader")
+    build_and_publish(runtime_conn)  # a new reader is a reason to try it again
+    assert len(reads) == 2
+
+
 def test_ocr_that_fails_while_reading_the_layout_is_an_error_not_empty_pages(monkeypatch):
     import pytest
     import crawler.textextract
