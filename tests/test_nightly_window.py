@@ -1,6 +1,6 @@
 """P24 (D91, user 2026-10-31: "lets to 2am to 6 am"): the nightly run works from 2 to 6 AM Pacific and picks up where
-it left off. `./crawl auto --nightly` (the server's cron) starts only in the 2 AM hour, Pacific time, so one of two
-cron lines (09:00 and 10:00 UTC) is the right one in summer and winter; at 6 AM it starts no new brand, page, manual or
+it left off. `./crawl auto --nightly` (the server's cron, every minute since 2026-11-01) starts once a night, at the
+Settings tab's start time Pacific (hour and minute) or the first call after it, until the stop time; at 6 AM it starts no new brand, page, manual or
 tagging wait, writes its report and ends. Work is saved as it goes, so what it did not reach is simply still due.
 Brands take turns: the next run starts with the brand whose last turn is oldest; priority orders brands with the same.
 A plain `./crawl auto` (by hand) has no window. Fake web server, fake AI, rolled back after each test."""
@@ -54,17 +54,29 @@ def a_brand_with_a_manual(world):
 
 # ---------------------------------------------------------------- the window
 
-@pytest.mark.parametrize("utc,stop", [
-    (datetime(2026, 7, 1, 9, 30), datetime(2026, 7, 1, 13, 0)),    # 2:30 AM PDT, stops 6 AM PDT
-    (datetime(2026, 11, 1, 10, 0), datetime(2026, 11, 1, 14, 0)),  # the morning the clocks went back: 2 AM PST
-    (datetime(2026, 1, 15, 10, 59), datetime(2026, 1, 15, 14, 0)),  # 2:59 AM PST
-    (datetime(2026, 7, 1, 10, 0), None),                           # 3 AM PDT: too late to start
-    (datetime(2026, 11, 1, 9, 0), None),                           # 1 AM PST: the other cron line, too early
-    (datetime(2026, 1, 15, 9, 0), None),                           # 1 AM PST
+@pytest.mark.parametrize("utc,window", [
+    (datetime(2026, 7, 1, 9, 0), (datetime(2026, 7, 1, 9, 0), datetime(2026, 7, 1, 13, 0))),    # 2 AM PDT, to 6 AM
+    (datetime(2026, 11, 1, 10, 0), (datetime(2026, 11, 1, 10, 0), datetime(2026, 11, 1, 14, 0))),  # clocks went back
+    (datetime(2026, 7, 1, 10, 0), (datetime(2026, 7, 1, 9, 0), datetime(2026, 7, 1, 13, 0))),   # 3 AM PDT: late, still in
+    (datetime(2026, 7, 1, 12, 59), (datetime(2026, 7, 1, 9, 0), datetime(2026, 7, 1, 13, 0))),  # 5:59 AM PDT
+    (datetime(2026, 7, 1, 13, 0), None),                                                        # 6 AM PDT: over
+    (datetime(2026, 11, 1, 9, 0), None),                                                        # 1 AM PST: too early
+    (datetime(2026, 1, 15, 9, 59), None),                                                       # 1:59 AM PST
 ])
-def test_a_nightly_run_starts_only_in_the_2_am_hour_pacific_and_stops_at_6(utc, stop):
-    from crawler.clock import nightly_stop
-    assert nightly_stop(utc) == stop
+def test_a_nightly_run_may_start_from_2_am_pacific_until_6(utc, window):
+    from crawler.clock import nightly_window
+    assert nightly_window(utc) == window
+
+
+def test_the_window_goes_down_to_the_minute():
+    """User 2026-11-01: "support down to the minute"."""
+    from crawler.clock import nightly_window
+    start, stop = (2, 30), (6, 45)
+    assert nightly_window(datetime(2026, 7, 1, 9, 29), start, stop) is None  # 2:29 AM PDT
+    assert nightly_window(datetime(2026, 7, 1, 9, 30), start, stop) == (datetime(2026, 7, 1, 9, 30),
+                                                                         datetime(2026, 7, 1, 13, 45))
+    assert nightly_window(datetime(2026, 7, 1, 13, 44), start, stop) is not None  # 6:44 AM PDT
+    assert nightly_window(datetime(2026, 7, 1, 13, 45), start, stop) is None
 
 
 def test_with_no_window_time_is_never_up():
@@ -175,45 +187,91 @@ def test_sections_start_no_new_manual_once_time_is_up(runtime_conn, monkeypatch)
 
 # ---------------------------------------------------------------- the command
 
-def test_the_nightly_command_outside_the_start_hour_starts_no_run_and_says_nothing(runtime_conn, monkeypatch):
-    """The cron calls it every hour (P25), so the other 23 calls stay out of the log."""
+def nightly(runtime_conn, monkeypatch, utc):
+    """`./crawl auto --nightly` at utc, with the run itself swapped out: returns (code, output, the stop it was given
+    or None when no run started). The year is 2030 so the test database's real runs are all before the window."""
+    import crawler.auto
     import crawler.clock
     from test_p11_cli import cli
-    monkeypatch.setattr(crawler.clock, "utcnow", lambda: datetime(2026, 7, 1, 10, 0))  # 3 AM PDT
-    before = q(runtime_conn, "SELECT COUNT(*) FROM runs")[0][0]
+    started = []
+    monkeypatch.setattr(crawler.clock, "utcnow", lambda: utc)
+    monkeypatch.setattr(crawler.auto, "run_auto", lambda conn, **kw: started.append(kw["stop_at"]) or {
+        "state": "skipped", "run_id": None, "brands": {}, "needs_you": []})
     code, out, err = cli(runtime_conn, "auto", "--nightly")
     assert code == 0, err
-    assert out.strip() == ""
+    return out, started[0] if started else None
+
+
+def test_the_nightly_command_outside_the_window_starts_no_run_and_says_nothing(runtime_conn, monkeypatch):
+    """The cron calls it every minute (user 2026-11-01), so every call outside the window stays out of the log."""
+    before = q(runtime_conn, "SELECT COUNT(*) FROM runs")[0][0]
+    out, stop = nightly(runtime_conn, monkeypatch, datetime(2030, 7, 1, 13, 0))  # 6 AM PDT
+    assert (out.strip(), stop) == ("", None)
     assert q(runtime_conn, "SELECT COUNT(*) FROM runs")[0][0] == before
+
+
+def test_the_nightly_command_starts_late_when_tonight_has_no_run_yet(runtime_conn, monkeypatch):
+    """The server was down at 2 AM: the 3:10 call still starts tonight's run, with the same 6 AM stop."""
+    out, stop = nightly(runtime_conn, monkeypatch, datetime(2030, 7, 1, 10, 10))  # 3:10 AM PDT
+    assert stop == datetime(2030, 7, 1, 13, 0)
+
+
+def test_the_nightly_command_starts_once_a_night(runtime_conn, monkeypatch):
+    """A run already started tonight (going, done or skipped): the next minute's call does nothing and says nothing."""
+    q(runtime_conn, "INSERT INTO runs (state, started_at) VALUES ('done', %s)", (datetime(2030, 7, 1, 9, 0),))
+    out, stop = nightly(runtime_conn, monkeypatch, datetime(2030, 7, 1, 9, 1))
+    assert (out.strip(), stop) == ("", None)
+
+
+def test_last_nights_run_does_not_count_for_tonight(runtime_conn, monkeypatch):
+    q(runtime_conn, "INSERT INTO runs (state, started_at) VALUES ('done', %s)", (datetime(2030, 6, 30, 9, 0),))
+    out, stop = nightly(runtime_conn, monkeypatch, datetime(2030, 7, 1, 9, 0))
+    assert stop == datetime(2030, 7, 1, 13, 0)
 
 
 # ---------------------------------------------------------------- the Settings tab's hours (P25, D93)
 
 def test_a_window_that_crosses_midnight_stops_the_next_morning():
-    from crawler.clock import nightly_stop
-    assert nightly_stop(datetime(2026, 7, 2, 5, 30), 22, 6) == datetime(2026, 7, 2, 13, 0)  # 10:30 PM PDT -> 6 AM PDT
-    assert nightly_stop(datetime(2026, 7, 2, 6, 30), 22, 6) is None  # 11:30 PM PDT
+    from crawler.clock import nightly_window
+    late = (datetime(2026, 7, 2, 5, 30), datetime(2026, 7, 2, 13, 0))  # 10:30 PM PDT -> 6 AM PDT
+    assert nightly_window(datetime(2026, 7, 2, 5, 30), (22, 30), (6, 0)) == late
+    assert nightly_window(datetime(2026, 7, 2, 12, 0), (22, 30), (6, 0)) == late  # 5 AM PDT, the next morning
+    assert nightly_window(datetime(2026, 7, 2, 5, 29), (22, 30), (6, 0)) is None  # 10:29 PM PDT
 
 
-def test_the_hours_come_from_the_settings_row_with_2_and_6_by_default(runtime_conn):
-    from crawler.clock import window_hours
-    assert window_hours(runtime_conn) == (2, 6)
+def test_the_times_come_from_the_settings_row_with_2_and_6_by_default(runtime_conn):
+    from crawler.clock import window_times
+    assert window_times(runtime_conn) == ((2, 0), (6, 0))
 
 
-def test_the_admin_page_can_change_the_hours_and_nothing_else(admin_conn):
-    from crawler.clock import window_hours
+def test_the_admin_page_can_change_the_times_and_nothing_else(admin_conn):
+    from crawler.clock import window_times
     with admin_conn.cursor() as cur:
-        cur.execute("UPDATE control.settings SET window_start_hour = 22, window_stop_hour = 5 WHERE id = 1")
-    assert window_hours(admin_conn) == (22, 5)
+        cur.execute("UPDATE control.settings SET window_start_hour = 22, window_start_minute = 15, "
+                    "window_stop_hour = 5, window_stop_minute = 45 WHERE id = 1")
+    assert window_times(admin_conn) == ((22, 15), (5, 45))
     from test_p1_users import refused
     assert refused(admin_conn, "INSERT INTO control.settings (id) VALUES (2)")
     assert refused(admin_conn, "DELETE FROM control.settings WHERE false")
 
 
-def test_the_same_hour_for_start_and_stop_is_refused(admin_conn):
+def test_the_same_time_for_start_and_stop_is_refused(admin_conn):
     with pytest.raises(psycopg.errors.CheckViolation):
         with admin_conn.cursor() as cur:
-            cur.execute("UPDATE control.settings SET window_start_hour = 3, window_stop_hour = 3 WHERE id = 1")
+            cur.execute("UPDATE control.settings SET window_start_hour = 3, window_start_minute = 20, "
+                        "window_stop_hour = 3, window_stop_minute = 20 WHERE id = 1")
+
+
+def test_the_same_hour_with_different_minutes_is_a_window(admin_conn):
+    with admin_conn.cursor() as cur:
+        cur.execute("UPDATE control.settings SET window_start_hour = 3, window_start_minute = 0, "
+                    "window_stop_hour = 3, window_stop_minute = 30 WHERE id = 1")
+
+
+def test_a_minute_past_59_is_refused(admin_conn):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with admin_conn.cursor() as cur:
+            cur.execute("UPDATE control.settings SET window_stop_minute = 60 WHERE id = 1")
 
 
 def test_the_report_says_the_real_stop_time():
@@ -221,6 +279,7 @@ def test_the_report_says_the_real_stop_time():
     assert stop_words(datetime(2026, 7, 1, 13, 0)) == "6 AM"   # PDT
     assert stop_words(datetime(2026, 1, 15, 5, 0)) == "9 PM"   # PST, the evening before
     assert stop_words(datetime(2026, 1, 15, 8, 0)) == "12 AM"
+    assert stop_words(datetime(2026, 7, 1, 13, 45)) == "6:45 AM"
 
 
 # ---------------------------------------------------------------- manuals go live in the window (P24 fix, 2026-11-01)
