@@ -98,6 +98,20 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     summary["trades"] = step("following the brands' trades", lambda: follow_trades(conn)) or {}
     summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0, "rejected": 0}
     retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
+    summary["sections_built"] = 0
+
+    def vectors(label):
+        """Search vectors for live sections without them. Run first (what last night built) and last, so a window
+        the brands use up never leaves built sections unsearchable (prod run 6, 2026-11-01)."""
+        if embedder is None:
+            return
+        from crawler.embed import embed_pass
+        embedded = step(label, lambda: embed_pass(conn, embedder, after_request=commit))
+        summary["embedded"] += (embedded or {}).get("embedded", 0)
+        if embedded and embedded.get("capped") and "embedding stopped at the monthly AI cap" not in summary["needs_you"]:
+            summary["needs_you"].append("embedding stopped at the monthly AI cap")
+
+    vectors("embedding what last night built")
     from crawler.clock import time_up
     summary["waiting_for_tomorrow"] = []
     # P24: the brand whose last turn is oldest goes first (one the window did not reach yesterday), then priority
@@ -129,6 +143,10 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         if not over and ai_client is not None:
             row["tagged"] = step(f"tagging {name}", lambda: _tag(conn, ai_client, brand_id, name, commit, sleep,
                                                                   wait_seconds, poll_seconds)) or 0
+        # the brand's newly tagged manuals go live in its own turn, not after every brand (prod run 6, 2026-11-01)
+        from crawler.kb import build_and_publish
+        mine = step(f"sections for {name}", lambda: build_and_publish(conn, brand_id=brand_id, after_document=commit))
+        summary["sections_built"] += (mine or {}).get("built", 0)
         step(f"host trials for {name}", lambda: _trials(conn, brand_id, name, summary))
         row["coverage"] = step(f"coverage for {name}", lambda: _coverage(
             conn, fetcher if public_lists else None, None if over else ai_client, brand_id, name, first_document,
@@ -144,13 +162,10 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
                                                             poll_seconds))
 
     from crawler.kb import build_and_publish, check
-    built = step("sections", lambda: build_and_publish(conn, after_document=commit))  # each stops at 6 AM itself
-    if embedder is not None:
-        from crawler.embed import embed_pass
-        embedded = step("embedding", lambda: embed_pass(conn, embedder, after_request=commit))
-        summary["embedded"] = (embedded or {}).get("embedded", 0)
-        if embedded and embedded.get("capped"):
-            summary["needs_you"].append("embedding stopped at the monthly AI cap")
+    # whatever no turn built (uploads, a re-read after a reader change); each stops at the stop time by itself
+    built = step("sections", lambda: build_and_publish(conn, after_document=commit))
+    summary["sections_built"] += (built or {}).get("built", 0)
+    vectors("embedding")
     if owner_connect is not None:
         summary["pruned"] = step("prune", lambda: _prune(owner_connect))
     sorted_misses = step("sorting Breeze misses", lambda: _misses(conn, ai_client, embedder, now, commit)) or {}
@@ -169,7 +184,6 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
                        ("missing_originals", "live manuals whose original is missing")):
         if report.get(key):
             summary["needs_you"].append(f"check: {len(report[key])} {words}: {report[key][:10]}")
-    summary["sections_built"] = (built or {}).get("built", 0)
     summary["documents_added"] = _rows(conn, "SELECT COUNT(*) FROM documents WHERE id > %s", (first_document,))[0][0]
     summary["documents_retired"] = max(0, _rows(conn, "SELECT COUNT(*) FROM documents WHERE state = 'retired'")[0][0]
                                        - retired_before)

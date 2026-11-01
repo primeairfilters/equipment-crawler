@@ -221,3 +221,53 @@ def test_the_report_says_the_real_stop_time():
     assert stop_words(datetime(2026, 7, 1, 13, 0)) == "6 AM"   # PDT
     assert stop_words(datetime(2026, 1, 15, 5, 0)) == "9 PM"   # PST, the evening before
     assert stop_words(datetime(2026, 1, 15, 8, 0)) == "12 AM"
+
+
+# ---------------------------------------------------------------- manuals go live in the window (P24 fix, 2026-11-01)
+# Prod run 6: the brands' turns used the whole window, so the sections and vector steps after them always found time
+# up, and 313 tagged manuals never went live. Now a brand's manuals are cut into sections in its own turn, and the
+# vectors left from the night before are made at the start of the run.
+
+def test_a_brands_manuals_go_live_in_its_own_turn_even_when_time_runs_out_after_it(world, monkeypatch):
+    import crawler.kb
+    a_brand_with_a_manual(world)
+    other, _ = a_second_brand(world)
+    up = [False]
+    real = crawler.kb.build_and_publish
+
+    def build_then_time_is_up(conn, **kwargs):
+        out = real(conn, **kwargs)
+        if kwargs.get("brand_id") is not None:
+            up[0] = True  # the first brand's sections are done: time runs out now
+        return out
+
+    monkeypatch.setattr(crawler.kb, "build_and_publish", build_then_time_is_up)
+    summary = run(world, stop_at=T + timedelta(hours=1), clock=lambda: T + timedelta(hours=2) if up[0] else T)
+    assert list(summary["brands"]) == [world.brand] and summary["waiting_for_tomorrow"] == [other]
+    live = q(world.conn, "SELECT COUNT(*) FROM sections s JOIN document_urls du ON du.document_id = s.document_id "
+                         "JOIN pages p ON p.id = du.page_id WHERE p.brand_id = %s AND s.is_live", (world.brand_id,))[0][0]
+    assert live > 0
+    assert summary["sections_built"] >= 1
+
+
+def test_vectors_left_from_last_night_are_made_at_the_start_of_the_run(world, monkeypatch):
+    import crawler.embed
+    a_brand_with_a_manual(world)
+    run(world, embedder=None)  # last night: sections built, no vectors
+    missing = q(world.conn, "SELECT COUNT(*) FROM sections s WHERE s.is_live AND NOT EXISTS (SELECT 1 FROM "
+                            "section_vectors_te3s_1536 v WHERE v.section_id = s.id)")[0][0]
+    assert missing > 0
+    up = [False]
+    real = crawler.embed.embed_pass
+
+    def embed_then_time_is_up(*args, **kwargs):
+        out = real(*args, **kwargs)
+        up[0] = True
+        return out
+
+    monkeypatch.setattr(crawler.embed, "embed_pass", embed_then_time_is_up)
+    summary = run(world, stop_at=T + timedelta(hours=1), clock=lambda: T + timedelta(hours=2) if up[0] else T)
+    assert summary["brands"] == {}  # time ran out right after the vectors, before any turn
+    assert summary["embedded"] > 0
+    assert q(world.conn, "SELECT COUNT(*) FROM sections s WHERE s.is_live AND NOT EXISTS (SELECT 1 FROM "
+                         "section_vectors_te3s_1536 v WHERE v.section_id = s.id)")[0][0] < missing
