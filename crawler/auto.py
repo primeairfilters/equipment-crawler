@@ -47,7 +47,7 @@ def _utcnow():
 
 def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None, owner_connect=None, commit=None,
              sleep=time.sleep, now=None, max_pages=AUTO_MAX_PAGES, wait_seconds=WAIT_SECONDS,
-             poll_seconds=POLL_SECONDS, public_lists=True):
+             poll_seconds=POLL_SECONDS, public_lists=True, stop_at=None, clock=None):
     """Returns the run's summary: state ('done' or 'skipped'), run_id, brands {name: {...}}, documents_added,
     documents_retired, embedded, ai_spent, needs_you [lines], interrupted_runs."""
     commit = commit or (lambda: None)
@@ -56,10 +56,15 @@ def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None,
                              "'UTC', %s) RETURNING id", (json.dumps({"why": "another run is still going"}),))[0][0]
         commit()
         return {"state": "skipped", "run_id": run_id, "brands": {}, "needs_you": []}
+    from crawler import clock as window
+    if stop_at is not None:  # P24: the nightly window (stop_at is 6 AM Pacific, in UTC); a run by hand has none
+        window.set_stop(stop_at, clock)
     try:
         return _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit, sleep,
                     now or _utcnow(), max_pages, wait_seconds, poll_seconds, public_lists)
     finally:
+        if stop_at is not None:
+            window.clear()
         _rows(conn, "SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 
 
@@ -72,7 +77,9 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     retired_before = _rows(conn, "SELECT COUNT(*) FROM documents WHERE state = 'retired'")[0][0]
     first_call = _rows(conn, "SELECT COALESCE(MAX(id), 0) FROM ai_calls")[0][0]
     commit()
-    summary = {"state": "done", "run_id": run_id, "brands": {}, "needs_you": [], "interrupted_runs": interrupted,
+    from crawler import clock as window
+    summary = {"stop_at": window._stop_at, "state": "done", "run_id": run_id, "brands": {}, "needs_you": [],
+               "interrupted_runs": interrupted,
                "embedded": 0, "pruned": None, "hosts": []}
 
     def step(name, work):
@@ -91,11 +98,19 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     summary["trades"] = step("following the brands' trades", lambda: follow_trades(conn)) or {}
     summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0, "rejected": 0}
     retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
+    from crawler.clock import time_up
+    summary["waiting_for_tomorrow"] = []
+    # P24: the brand whose last turn is oldest goes first (one the window did not reach yesterday), then priority
     for brand_id, name, budget, discovered in _rows(
             conn, "SELECT b.id, b.name, b.monthly_budget_usd, b.discovered_at IS NOT NULL OR EXISTS (SELECT 1 FROM "
                   "start_urls s WHERE s.brand_id = b.id) FROM brands b "
                   "LEFT JOIN control.brands c ON c.crawl_brand_id = b.id WHERE b.status = 'active' "
-                  "ORDER BY COALESCE(c.priority, 0) DESC, b.id"):
+                  "ORDER BY COALESCE(b.last_turn_run, 0), COALESCE(c.priority, 0) DESC, b.id"):
+        if summary["waiting_for_tomorrow"] or time_up():
+            summary["waiting_for_tomorrow"].append(name)  # still due: its turn comes first tomorrow
+            continue
+        _rows(conn, "UPDATE brands SET last_turn_run = %s WHERE id = %s", (run_id, brand_id))
+        commit()
         spent = _rows(conn, "SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE brand_id = %s AND created_at >= %s",
                       (brand_id, month))[0][0]
         over = Decimal(spent) >= Decimal(budget)
@@ -129,7 +144,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
                                                             poll_seconds))
 
     from crawler.kb import build_and_publish, check
-    built = step("sections", lambda: build_and_publish(conn, after_document=commit))
+    built = step("sections", lambda: build_and_publish(conn, after_document=commit))  # each stops at 6 AM itself
     if embedder is not None:
         from crawler.embed import embed_pass
         embedded = step("embedding", lambda: embed_pass(conn, embedder, after_request=commit))
@@ -282,7 +297,8 @@ def _tag(conn, client, brand_id, name, commit, sleep, wait_seconds, poll_seconds
         tagged += done.get("collected", 0)
         commit()
         out = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS NOT NULL", (brand_id,))[0][0]
-        if not out or waited >= wait_seconds:
+        from crawler.clock import time_up
+        if not out or waited >= wait_seconds or time_up():  # at 6 AM the answers wait for the next run, paid for
             return tagged
         sleep(poll_seconds)
         waited += poll_seconds
@@ -313,6 +329,12 @@ def _report(summary, now):
                 else "no public model list names its models"
             lines.append(f"  coverage: {share}; searches {cov['gap_searches']} web, {cov['site_searches']} site; "
                          f"phase {cov['phase'].replace('_', ' ')}")
+    waiting = summary.get("waiting_for_tomorrow") or []
+    if waiting:
+        from crawler.clock import stop_words
+        when = stop_words(summary["stop_at"]) if summary.get("stop_at") else "the stop time"
+        lines.append(f"Stopped at {when}: {len(waiting)} brand(s) wait for tomorrow and go first then: "
+                     + ", ".join(waiting[:20]) + (f" and {len(waiting) - 20} more" if len(waiting) > 20 else ""))
     up = summary.get("uploads") or {}
     if any(up.values()):
         lines.append(f"Uploads: added {up['added']}, already had {up['already_had']}, rejected {up['rejected']}")

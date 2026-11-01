@@ -72,7 +72,10 @@ def reread(conn, brand_id=None, after_document=None, documents=None):
                  (documents, documents, brand_id, brand_id))
     read = unreadable = 0
     done = []  # the documents whose original was read again (parse issues: only these can be fixed)
+    from crawler.clock import time_up
     for document_id, sha in docs:
+        if time_up():  # P24: 6 AM; what is not re-read stays open and is taken again tomorrow
+            break
         body = library.read(sha)
         if body is None:
             unreadable += 1

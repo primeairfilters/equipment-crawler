@@ -72,8 +72,11 @@ def build_parser():
     different.add_argument("first", type=int)
     different.add_argument("second", type=int)
     different.add_argument("--reason", required=True)
-    sub.add_parser("auto", help="the nightly run: crawl, tag, sections, embed, prune and check every active brand, then "
-                                "report (one run at a time)")
+    nightly = sub.add_parser("auto", help="the nightly run: crawl, tag, sections, embed, prune and check every active "
+                                          "brand, then report (one run at a time)")
+    nightly.add_argument("--nightly", action="store_true",
+                         help="the server's cron (every hour): start only in the Settings tab's start hour, Pacific "
+                              "time, and start no new work from its stop hour")
     sub.add_parser("misses", help="sort what Breeze could not answer, and write the answered ones as eval questions")
     sub.add_parser("issues", help="write the documents the code could not handle as a Markdown fix list for Claude")
     sub.add_parser("uploads", help="take in the documents uploaded on the admin page now (the nightly run does it too)")
@@ -412,7 +415,13 @@ def main(argv):
                                                by_whom=getpass.getuser())
                 print(f"Marked {first} and {second} as different manuals; check will not list them as duplicates.")
             elif args.command == "auto":
+                from crawler import clock
                 from crawler.auto import run_auto
+                stop_at = None
+                if args.nightly:  # the cron calls this every hour: only the Settings tab's start hour starts a run
+                    stop_at = clock.nightly_stop(clock.utcnow(), *clock.window_hours(conn))
+                    if stop_at is None:
+                        return 0  # not the start hour: nothing to say, so the log stays short
                 from crawler.db import connect as connect_as
                 from crawler.embed import OpenAIEmbedder
                 from crawler.fetch import Fetcher
@@ -428,7 +437,8 @@ def main(argv):
                     print("No OpenAI key is set, so new sections wait without vectors.")
                     embedder = None
                 summary = run_auto(conn, fetcher=Fetcher(conn), link_checker=_link_checker(), ai_client=ai_client,
-                                   embedder=embedder, owner_connect=lambda: connect_as("migrate"), commit=conn.commit)
+                                   embedder=embedder, owner_connect=lambda: connect_as("migrate"), commit=conn.commit,
+                                   stop_at=stop_at)
                 if summary["state"] == "skipped":
                     print("Another run is still going; this one was skipped.")
                 else:

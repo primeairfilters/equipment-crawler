@@ -113,7 +113,8 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
                                 (brand_id,)))
             keys = [k for k in keys if in_trades(listed.get(family(k)), trades)]
         for fam in sorted({family(k) for k in keys}):
-            if used >= max_searches or (limit is not None and summary["searched"] >= limit):
+            from crawler.clock import time_up
+            if used >= max_searches or (limit is not None and summary["searched"] >= limit) or time_up():
                 return summary
             last = _rows(conn, "SELECT searched_at, found FROM gapfill_searches WHERE brand_id = %s AND family = %s",
                          (brand_id, fam))

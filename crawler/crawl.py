@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urldefrag, urljoin, urlsplit, urlunspli
 
 from selectolax.lexbor import LexborHTMLParser
 
+from crawler.clock import time_up
 from crawler import library
 from crawler.brands import UnknownTarget, find_brand
 from crawler.documents import record_pdf
@@ -183,6 +184,8 @@ class _StartCrawl:
                 left = self._over_limit([url] + [item[3] for item in self.heap])
                 break
             if not _active(self.conn, self.brand_id, self.start_id):
+                break
+            if time_up():  # P24: 6 AM; the pages not fetched are still due, so the next run carries on
                 break
             if self._newly_approved():
                 self.push(url, depth, parent_id, kind, priority)  # judged again after the PDFs that came into scope

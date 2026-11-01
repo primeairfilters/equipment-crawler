@@ -139,7 +139,10 @@ def embed_pass(conn, client, *, brand_id=None, cap_usd=None, now=None, after_req
     if group:
         groups.append(group)
 
+    from crawler.clock import time_up
     for group in groups:
+        if time_up():  # P24: 6 AM; the sections without vectors are still due tomorrow
+            break
         worst = ai.cost(MODEL, sum(_estimate(text) for _, text, _ in group))
         if ai.monthly_spend(conn, now) + worst > cap:
             summary["capped"] = True

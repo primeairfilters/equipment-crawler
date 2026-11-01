@@ -16,7 +16,7 @@ import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from crawler import library, textextract
+from crawler import clock, library, textextract
 from crawler.brands import UnknownTarget
 from crawler.sections import SECTIONER_VERSION, build_sections, terms
 from crawler.store import alias_key
@@ -285,6 +285,8 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
     ahead = deque()
     try:
         for (document_id,) in docs:  # keep at most twice the workers read ahead: finished layouts wait in memory
+            if clock.time_up():  # P24: at 6 AM no new manual is started; the rest are still due tomorrow
+                break
             ahead.append((document_id, pool.submit(read_original, *files[document_id])))
             if len(ahead) < 2 * workers:
                 continue
