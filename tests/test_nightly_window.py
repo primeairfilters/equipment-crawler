@@ -330,3 +330,113 @@ def test_vectors_left_from_last_night_are_made_at_the_start_of_the_run(world, mo
     assert summary["embedded"] > 0
     assert q(world.conn, "SELECT COUNT(*) FROM sections s WHERE s.is_live AND NOT EXISTS (SELECT 1 FROM "
                          "section_vectors_te3s_1536 v WHERE v.section_id = s.id)")[0][0] < missing
+
+
+# ---------------------------------------------------------------- Run all the time (user 2026-11-01)
+
+def test_run_all_the_time_starts_outside_the_times_with_no_stop(runtime_conn, monkeypatch):
+    """User 2026-11-01: "a switch that if I turn it on the crawler will just run and ignore the times"."""
+    import crawler.clock
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: True)
+    calls = started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 0))  # 1 PM PDT, outside 2-6 AM
+    assert [kw["stop_at"] for kw in calls] == [None]
+
+
+def started_a_run(runtime_conn, monkeypatch, utc):
+    """The run_auto calls `./crawl auto --nightly` made at utc (nightly() cannot tell no run from a run with no stop)."""
+    import crawler.auto
+    import crawler.clock
+    from test_p11_cli import cli
+    calls = []
+    monkeypatch.setattr(crawler.clock, "utcnow", lambda: utc)
+    monkeypatch.setattr(crawler.auto, "run_auto", lambda conn, **kw: calls.append(kw) or {
+        "state": "skipped", "run_id": None, "brands": {}, "needs_you": []})
+    code, out, err = cli(runtime_conn, "auto", "--nightly")
+    assert code == 0, err
+    return calls
+
+
+def test_run_all_the_time_starts_at_most_one_run_an_hour(runtime_conn, monkeypatch):
+    """A run that finds nothing to do ends in minutes; the next one waits until an hour after it started."""
+    import crawler.clock
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: True)
+    q(runtime_conn, "INSERT INTO runs (state, started_at, finished_at) VALUES ('done', %s, %s)",
+      (datetime(2030, 7, 1, 19, 30), datetime(2030, 7, 1, 19, 35)))
+    assert not started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 0))
+    assert started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 31))
+
+
+def test_run_all_the_time_waits_while_a_run_is_going_and_logs_nothing(runtime_conn, monkeypatch):
+    """A long run (started over an hour ago) still going: the every-minute call leaves no skipped row behind."""
+    import crawler.clock
+    from crawler.auto import LOCK_KEY
+    from support import connect
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: True)
+    other = connect("runtime", autocommit=True)
+    try:
+        with other.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
+        before = q(runtime_conn, "SELECT COUNT(*) FROM runs")[0][0]
+        assert not started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 0))
+        assert q(runtime_conn, "SELECT COUNT(*) FROM runs")[0][0] == before
+    finally:
+        other.close()  # the lock goes with the session
+
+
+def test_the_switch_is_off_by_default_and_the_admin_page_can_turn_it_on(runtime_conn, admin_conn):
+    from crawler.clock import nonstop
+    assert nonstop(runtime_conn) is False
+    with admin_conn.cursor() as cur:
+        cur.execute("UPDATE control.settings SET run_nonstop = true WHERE id = 1")
+    assert nonstop(admin_conn) is True
+
+
+def test_a_nightly_run_passes_a_recheck_so_the_switch_and_the_times_apply_mid_run(runtime_conn, monkeypatch):
+    import crawler.auto
+    import crawler.clock
+    from test_p11_cli import cli
+    calls = []
+    monkeypatch.setattr(crawler.clock, "utcnow", lambda: datetime(2030, 7, 1, 9, 0))
+    monkeypatch.setattr(crawler.auto, "run_auto", lambda conn, **kw: calls.append(kw) or {
+        "state": "skipped", "run_id": None, "brands": {}, "needs_you": []})
+    cli(runtime_conn, "auto", "--nightly")
+    assert callable(calls[0]["recheck"])
+
+
+def test_the_current_stop_follows_the_switch_and_the_times(runtime_conn, monkeypatch):
+    """What a going run re-reads each minute: the switch on means no stop; off means the times' stop, or now when it
+    is outside them (so a run started by the switch stops within a minute of it going off)."""
+    import crawler.clock
+    from crawler.clock import current_stop
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: True)
+    assert current_stop(runtime_conn, datetime(2030, 7, 1, 20, 0)) is None
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: False)
+    assert current_stop(runtime_conn, datetime(2030, 7, 1, 20, 0)) == datetime(2030, 7, 1, 20, 0)  # 1 PM PDT
+    assert current_stop(runtime_conn, datetime(2030, 7, 1, 10, 0)) == datetime(2030, 7, 1, 13, 0)  # 3 AM PDT -> 6
+
+
+def test_time_up_rechecks_once_a_minute():
+    from crawler import clock
+    t = [datetime(2030, 7, 1, 20, 0)]
+    answers = []
+    def recheck(now):
+        answers.append(now)
+        return now  # the switch went off outside the times: stop now
+    clock.set_stop(None, lambda: t[0], recheck=recheck)
+    assert not clock.time_up()
+    t[0] += timedelta(seconds=59)
+    assert not clock.time_up() and answers == []
+    t[0] += timedelta(seconds=1)
+    assert clock.time_up() and len(answers) == 1
+
+
+def test_a_recheck_that_fails_keeps_the_stop_it_had():
+    from crawler import clock
+    t = [datetime(2030, 7, 1, 9, 0)]
+    def broken(now):
+        raise RuntimeError("database went away")
+    clock.set_stop(datetime(2030, 7, 1, 13, 0), lambda: t[0], recheck=broken)
+    t[0] += timedelta(minutes=5)
+    assert not clock.time_up()
+    t[0] = datetime(2030, 7, 1, 13, 0)
+    assert clock.time_up()

@@ -7,6 +7,8 @@ which means any trade, as before. The trades steer what the crawler does for tha
 - gap-fill and coverage only count ENERGY STAR categories of those trades (Samsung: no TV manuals);
 - `./crawl add-brands <file>` loads a list of "name | trade, trade" lines, every brand paused.
 Rolled back after each test; fake AI, no network."""
+import io
+import json
 import uuid
 
 import psycopg
@@ -55,11 +57,20 @@ def test_the_admin_page_can_add_and_change_a_brands_trades(admin_conn):
         assert cur.fetchone()[0] == ["hvac"]
 
 
-def test_a_trade_outside_tracforces_list_is_refused(admin_conn):
+def test_a_new_trade_added_to_tracforces_list_is_not_refused_by_the_database(admin_conn):
+    """User 2026-11-01: one trades list, so a trade added to the main app later is stored without a migration. The
+    admin page and add-brands check the list; the database keeps only the shape (0024)."""
+    with admin_conn.cursor() as cur:
+        cur.execute("INSERT INTO control.brands (name, trades) VALUES (%s, %s)",
+                    ("Probe New Trade " + uuid.uuid4().hex[:6], ["hvac", "solar_panels"]))
+
+
+@pytest.mark.parametrize("bad", [["HVAC"], ["hvac,plumbing"], [""], ["pool spa"]])
+def test_a_trade_that_is_not_a_plain_lowercase_key_is_refused(admin_conn, bad):
     with pytest.raises(psycopg.errors.CheckViolation):
         with admin_conn.cursor() as cur:
             cur.execute("INSERT INTO control.brands (name, trades) VALUES (%s, %s)",
-                        ("Probe Bad Trade " + uuid.uuid4().hex[:6], ["automotive"]))
+                        ("Probe Bad Trade " + uuid.uuid4().hex[:6], bad))
 
 
 def test_a_brand_with_no_trades_set_has_an_empty_list(runtime_conn):
@@ -262,7 +273,7 @@ def control_row(conn, name):
 def test_a_brand_list_adds_every_brand_paused_with_its_trades(runtime_conn):
     from crawler.brandlist import load
     a, b = "Zz" + uuid.uuid4().hex[:8], "Zz" + uuid.uuid4().hex[:8]
-    out = load(runtime_conn, ["# a comment", "", f"{a} | hvac", f"  {b}  |  plumbing , pool_spa  "])
+    out = load(runtime_conn, ["# a comment", "", f"{a} | hvac", f"  {b}  |  plumbing , pool_spa  "], TRADES_OK)
     assert out == {"added": 2, "trades_set": 0, "already_there": 0}
     assert control_row(runtime_conn, a) == ("paused", ["hvac"], "brand list")
     assert control_row(runtime_conn, b) == ("paused", ["plumbing", "pool_spa"], "brand list")
@@ -271,7 +282,7 @@ def test_a_brand_list_adds_every_brand_paused_with_its_trades(runtime_conn):
 def test_the_same_brand_twice_is_one_brand_with_both_trades(runtime_conn):
     from crawler.brandlist import load
     a = "Zz" + uuid.uuid4().hex[:8]
-    load(runtime_conn, [f"{a} | hvac", f"{a.upper()} | appliance_repair, hvac"])
+    load(runtime_conn, [f"{a} | hvac", f"{a.upper()} | appliance_repair, hvac"], TRADES_OK)
     assert control_row(runtime_conn, a)[1] == ["hvac", "appliance_repair"]
 
 
@@ -280,7 +291,7 @@ def test_a_brand_already_there_with_no_trades_gets_them_and_one_with_trades_is_l
     bare, set_already = "Zz" + uuid.uuid4().hex[:8], "Zz" + uuid.uuid4().hex[:8]
     q(runtime_conn, "INSERT INTO control.brands (name, state) VALUES (%s, 'active')", (bare,))
     q(runtime_conn, "INSERT INTO control.brands (name, state, trades) VALUES (%s, 'active', %s)", (set_already, ["hvac"]))
-    out = load(runtime_conn, [f"{bare} | hvac, plumbing", f"{set_already} | plumbing"])
+    out = load(runtime_conn, [f"{bare} | hvac, plumbing", f"{set_already} | plumbing"], TRADES_OK)
     assert out == {"added": 0, "trades_set": 1, "already_there": 1}
     assert control_row(runtime_conn, bare)[:2] == ("active", ["hvac", "plumbing"])  # its state is not touched
     assert control_row(runtime_conn, set_already)[1] == ["hvac"]
@@ -291,7 +302,7 @@ def test_a_list_with_a_bad_line_adds_nothing_and_says_which_line(runtime_conn):
     a = "Zz" + uuid.uuid4().hex[:8]
     for bad in (f"{a}", f"{a} |", f"{a} | automotive", " | hvac"):
         with pytest.raises(BadList) as err:
-            load(runtime_conn, [f"{a} | hvac", bad])
+            load(runtime_conn, [f"{a} | hvac", bad], TRADES_OK)
         assert "line 2" in str(err.value)
         assert control_row(runtime_conn, a) is None
 
@@ -299,7 +310,57 @@ def test_a_list_with_a_bad_line_adds_nothing_and_says_which_line(runtime_conn):
 def test_the_users_brand_list_is_valid_and_has_every_trade():
     from crawler.brandlist import parse
     with open("ops/brands-2026-10-31.txt") as handle:
-        brands = parse(handle.read().splitlines())
+        brands = parse(handle.read().splitlines(), TRADES_OK)
     assert len(brands) == 354
     assert {t for _, trades in brands.values() for t in trades} == set(TRADES_OK)
     assert brands["rheem"][1] == ["hvac", "plumbing", "pool_spa"] and brands["ruud"][1] == ["hvac", "plumbing"]
+
+
+# ---------------------------------------------------------------- Tracforce's one trades list (user 2026-11-01)
+
+class _Answer(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_the_trades_come_from_tracforces_list_without_other():
+    from crawler.trades import fetch
+    body = {"trades": [{"value": "hvac", "label": "HVAC"}, {"value": "solar_panels", "label": "Solar Panels"},
+                       {"value": "other", "label": "Other"}]}
+    asked = []
+    def opener(url, timeout):
+        asked.append(url)
+        return _Answer(json.dumps(body).encode())
+    assert fetch("http://main.test/api/public/trades", opener) == ["hvac", "solar_panels"]
+    assert asked == ["http://main.test/api/public/trades"]
+
+
+@pytest.mark.parametrize("answer", [b"not json", b'{"trades": []}', b'{"nope": 1}'])
+def test_an_unreadable_trades_list_says_so(answer):
+    from crawler.trades import Unavailable, fetch
+    with pytest.raises(Unavailable):
+        fetch("http://main.test/x", lambda url, timeout: _Answer(answer))
+
+
+def test_a_brand_list_takes_a_trade_new_to_tracforces_list(runtime_conn):
+    from crawler.brandlist import load
+    a = "Zz" + uuid.uuid4().hex[:8]
+    load(runtime_conn, [f"{a} | solar_panels, hvac"], ["hvac", "solar_panels"])
+    assert control_row(runtime_conn, a)[1] == ["hvac", "solar_panels"]
+
+
+def test_add_brands_with_the_trades_list_down_adds_nothing(runtime_conn, monkeypatch, tmp_path):
+    import crawler.trades
+    from test_p11_cli import cli
+    def down(url=None, opener=None):
+        raise crawler.trades.Unavailable("Could not read Tracforce's trades list")
+    monkeypatch.setattr(crawler.trades, "fetch", down)
+    a = "Zz" + uuid.uuid4().hex[:8]
+    listing = tmp_path / "brands.txt"
+    listing.write_text(f"{a} | hvac\n")
+    code, out, err = cli(runtime_conn, "add-brands", str(listing))
+    assert code == 1 and "Nothing added" in out and "trades list" in out
+    assert control_row(runtime_conn, a) is None

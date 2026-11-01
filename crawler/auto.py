@@ -45,9 +45,17 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def run_going(conn):
+    """True while another `auto` holds the lock (asked without leaving a skipped row behind)."""
+    if not _rows(conn, "SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,))[0][0]:
+        return True
+    _rows(conn, "SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+    return False
+
+
 def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None, owner_connect=None, commit=None,
              sleep=time.sleep, now=None, max_pages=AUTO_MAX_PAGES, wait_seconds=WAIT_SECONDS,
-             poll_seconds=POLL_SECONDS, public_lists=True, stop_at=None, clock=None):
+             poll_seconds=POLL_SECONDS, public_lists=True, stop_at=None, clock=None, recheck=None):
     """Returns the run's summary: state ('done' or 'skipped'), run_id, brands {name: {...}}, documents_added,
     documents_retired, embedded, ai_spent, needs_you [lines], interrupted_runs."""
     commit = commit or (lambda: None)
@@ -57,13 +65,14 @@ def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None,
         commit()
         return {"state": "skipped", "run_id": run_id, "brands": {}, "needs_you": []}
     from crawler import clock as window
-    if stop_at is not None:  # P24: the nightly window (stop_at is 6 AM Pacific, in UTC); a run by hand has none
-        window.set_stop(stop_at, clock)
+    timed = stop_at is not None or recheck is not None
+    if timed:  # P24: the nightly window (stop_at is 6 AM Pacific, in UTC); a run by hand has none
+        window.set_stop(stop_at, clock, recheck)
     try:
         return _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit, sleep,
                     now or _utcnow(), max_pages, wait_seconds, poll_seconds, public_lists)
     finally:
-        if stop_at is not None:
+        if timed:
             window.clear()
         _rows(conn, "SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 

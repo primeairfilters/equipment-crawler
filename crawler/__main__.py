@@ -418,11 +418,20 @@ def main(argv):
                 from crawler import clock
                 from crawler.auto import run_auto
                 stop_at = None
+                recheck = None
                 if args.nightly:  # the cron calls this every minute: one run a night, inside the Settings tab's times
-                    window = clock.nightly_window(clock.utcnow(), *clock.window_times(conn))
-                    if window is None or clock.ran_since(conn, window[0]):
-                        return 0  # outside the window, or tonight's run already started: nothing to say
-                    stop_at = window[1]
+                    now = clock.utcnow()
+                    if clock.nonstop(conn):  # "Run all the time": a new run when none is going, at most one an hour
+                        from datetime import timedelta
+                        from crawler.auto import run_going
+                        if run_going(conn) or clock.ran_since(conn, now - timedelta(hours=1)):
+                            return 0
+                    else:
+                        window = clock.nightly_window(now, *clock.window_times(conn))
+                        if window is None or clock.ran_since(conn, window[0]):
+                            return 0  # outside the window, or tonight's run already started: nothing to say
+                        stop_at = window[1]
+                    recheck = lambda at: clock.current_stop(conn, at)  # the switch and the times, once a minute
                 from crawler.db import connect as connect_as
                 from crawler.embed import OpenAIEmbedder
                 from crawler.fetch import Fetcher
@@ -439,7 +448,7 @@ def main(argv):
                     embedder = None
                 summary = run_auto(conn, fetcher=Fetcher(conn), link_checker=_link_checker(), ai_client=ai_client,
                                    embedder=embedder, owner_connect=lambda: connect_as("migrate"), commit=conn.commit,
-                                   stop_at=stop_at)
+                                   stop_at=stop_at, recheck=recheck)
                 if summary["state"] == "skipped":
                     print("Another run is still going; this one was skipped.")
                 else:
@@ -484,10 +493,11 @@ def main(argv):
                 print(text, end="")
             elif args.command == "add-brands":
                 from crawler.brandlist import BadList, load
+                from crawler.trades import Unavailable, fetch
                 try:
                     with open(args.file) as handle:
-                        done = load(conn, handle.read().splitlines())
-                except (BadList, OSError) as exc:
+                        done = load(conn, handle.read().splitlines(), fetch())
+                except (BadList, OSError, Unavailable) as exc:
                     conn.rollback()
                     print(f"Nothing added: {exc}")
                     return 1

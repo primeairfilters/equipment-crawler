@@ -35,7 +35,7 @@ def discover_question(brand, trades):
     the system prompt stays the same for every brand."""
     if not trades:
         return f"Brand: {brand}"
-    words = ", ".join(TRADE_WORDS.get(t, t) for t in trades)
+    words = ", ".join(TRADE_WORDS.get(t, t.replace("_", " ")) for t in trades)  # a trade new to the list: its key in words
     return (f"Brand: {brand}\nOnly its {words} equipment: leave out the sites and pages for its other products.")
 
 class UnknownModel(Exception):
