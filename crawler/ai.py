@@ -22,6 +22,22 @@ SEARCH_PRICE = Decimal("0.01")
 MILLION = Decimal(1_000_000)
 
 
+
+# P23: a brand's trades in the words of Tracforce's trade picker, for the first-night search question.
+TRADE_WORDS = {"hvac": "HVAC", "plumbing": "plumbing", "electrical": "electrical",
+               "commercial_refrigeration": "commercial refrigeration", "appliance_repair": "appliance repair",
+               "pool_spa": "pool and spa", "generators": "generators", "water_treatment": "water treatment",
+               "garage_doors": "garage doors"}
+
+
+def discover_question(brand, trades):
+    """The user turn of the discovery call. With trades, only that equipment is wanted (Honda: generators, not cars);
+    the system prompt stays the same for every brand."""
+    if not trades:
+        return f"Brand: {brand}"
+    words = ", ".join(TRADE_WORDS.get(t, t) for t in trades)
+    return (f"Brand: {brand}\nOnly its {words} equipment: leave out the sites and pages for its other products.")
+
 class UnknownModel(Exception):
     pass
 
@@ -110,12 +126,12 @@ class AnthropicClient:
         info = self._sdk.models.retrieve(model)
         return bool(info.capabilities and info.capabilities.server_tools.web_search.supported)
 
-    def discover(self, model, brand, max_uses, max_tokens):
+    def discover(self, model, brand, max_uses, max_tokens, trades=()):
         """One live call with the web search tool (not a batch). The answer is a JSON object."""
         from crawler.discover import DISCOVER_SCHEMA, DISCOVER_SYSTEM
         reply = self._sdk.messages.create(
             model=model, max_tokens=max_tokens, system=DISCOVER_SYSTEM,
-            messages=[{"role": "user", "content": f"Brand: {brand}"}],
+            messages=[{"role": "user", "content": discover_question(brand, trades)}],
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses,
                     "allowed_callers": ["direct"]}],
             output_config={"format": {"type": "json_schema", "schema": DISCOVER_SCHEMA}})

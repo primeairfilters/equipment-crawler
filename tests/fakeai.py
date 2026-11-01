@@ -100,9 +100,9 @@ class FakeDiscoverAI:
         self.calls.append(("supports_web_search", model))
         return model in self.web_search_models
 
-    def discover(self, model, brand, max_uses, max_tokens):
+    def discover(self, model, brand, max_uses, max_tokens, trades=()):
         from crawler.ai import DiscoverReply
-        self.calls.append(("discover", model, brand, max_uses, max_tokens))
+        self.calls.append(("discover", model, brand, max_uses, max_tokens, list(trades)))
         in_tok, out_tok, searches = self.usage
         out = self.output(brand) if callable(self.output) else self.output
         if isinstance(out, dict):

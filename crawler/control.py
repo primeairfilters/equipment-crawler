@@ -1,7 +1,8 @@
 """P19 (D75, D76; Q22): the admin page's brands (control.brands) reach the crawler, and a brand name is enough.
 
 - sync: at the start of every `auto`, each page row is linked to a crawler brand (made if new) and its controls are
-  copied: active runs, paused and archived are stopped; the monthly budget and the host-approval switch.
+  copied: active runs, paused and archived are stopped; the monthly budget, the host-approval switch and the
+  brand's trades (P23; empty = any trade).
 - discover_brand: a brand never discovered is asked about once (crawler/discover.py, one live web-search call); of
   the hosts it names, the brand's own site (own_site: its name is in the address) is approved at once for all its
   pages, recorded as a 'rule' decision. Every other host waits for the host judge (P18), which only ever approves PDFs.
@@ -36,9 +37,9 @@ def sync(conn):
         active = state == "active"
         if active != (status == "active"):
             crawler_brands.set_active(conn, brand_id, active)
-    _rows(conn, "UPDATE brands b SET monthly_budget_usd = c.monthly_budget_usd, auto_hosts = c.auto_hosts "
-                "FROM control.brands c WHERE c.crawl_brand_id = b.id AND (b.monthly_budget_usd, b.auto_hosts) "
-                "IS DISTINCT FROM (c.monthly_budget_usd, c.auto_hosts)")
+    _rows(conn, "UPDATE brands b SET monthly_budget_usd = c.monthly_budget_usd, auto_hosts = c.auto_hosts, "
+                "trades = c.trades FROM control.brands c WHERE c.crawl_brand_id = b.id AND (b.monthly_budget_usd, "
+                "b.auto_hosts, b.trades) IS DISTINCT FROM (c.monthly_budget_usd, c.auto_hosts, c.trades)")
     return linked
 
 

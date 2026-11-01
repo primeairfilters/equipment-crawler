@@ -87,6 +87,8 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
 
     month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     step("reading the admin page's brands", lambda: _sync(conn))
+    from crawler.kb import follow_trades
+    summary["trades"] = step("following the brands' trades", lambda: follow_trades(conn)) or {}
     summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0, "rejected": 0}
     retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
     for brand_id, name, budget, discovered in _rows(

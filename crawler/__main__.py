@@ -77,6 +77,9 @@ def build_parser():
     sub.add_parser("misses", help="sort what Breeze could not answer, and write the answered ones as eval questions")
     sub.add_parser("issues", help="write the documents the code could not handle as a Markdown fix list for Claude")
     sub.add_parser("uploads", help="take in the documents uploaded on the admin page now (the nightly run does it too)")
+    brand_list = sub.add_parser("add-brands", help="add a list of brands to the admin page's table, every one paused "
+                                                   "(one per line: name | trade, trade)")
+    brand_list.add_argument("file", help="the list, inside this folder (the container sees the repo at /work)")
     store = sub.add_parser("library", help="the originals library: upload copies the local folder's originals to S3")
     store.add_argument("action", choices=["upload"])
     sub.add_parser("check", help="a read-only health report of what Breeze can see")
@@ -468,6 +471,19 @@ def main(argv):
                         handle.write(text)
                     print("Wrote parse-issues.md in the documents folder (~/Documents/equipment-crawler-docs on the Mac).")
                 print(text, end="")
+            elif args.command == "add-brands":
+                from crawler.brandlist import BadList, load
+                try:
+                    with open(args.file) as handle:
+                        done = load(conn, handle.read().splitlines())
+                except (BadList, OSError) as exc:
+                    conn.rollback()
+                    print(f"Nothing added: {exc}")
+                    return 1
+                conn.commit()
+                print(f"Brands: added {done['added']} (all paused), trades set on {done['trades_set']} already there, "
+                      f"{done['already_there']} already there with trades left as they were. Resume a brand on the admin "
+                      "page to start crawling it at the next nightly run.")
             elif args.command == "uploads":
                 from crawler.control import sync
                 from crawler.uploads import process_uploads

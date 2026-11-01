@@ -112,14 +112,64 @@ def pull_models(conn, fetcher, brand_id, name, *, now=None, base_url=None, allow
     return {"status": status, "rows": seen}
 
 
+# ---------------------------------------------------------------- trades (P23)
+
+# Each ENERGY STAR Model Index category (the full list, read 2026-10-31) and the Tracforce trades it belongs to. A
+# category in no trade (TVs, computers, phones, commercial cooking) is never chased for a brand with trades set.
+CATEGORY_TRADES = {
+    "Boilers": {"hvac", "plumbing"},
+    "Ceiling Fans": {"electrical"},
+    "Central Air Conditioners and Air Source Heat Pumps": {"hvac"},
+    "Clothes Dryers": {"appliance_repair"},
+    "Clothes Washers": {"appliance_repair"},
+    "Commercial Boilers": {"hvac", "plumbing"},
+    "Commercial Ice Machines": {"commercial_refrigeration"},
+    "Commercial Refrigerators and Freezers": {"commercial_refrigeration"},
+    "Commercial Water Heaters": {"plumbing"},
+    "Connected Thermostats": {"hvac"},
+    "Consumer Refrigeration Products": {"appliance_repair"},
+    "Dehumidifiers": {"hvac", "appliance_repair"},
+    "Dishwashers": {"appliance_repair"},
+    "Downlights": {"electrical"},
+    "Electric Vehicle Supply Equipment": {"electrical"},
+    "Furnaces": {"hvac"},
+    "Geothermal Heat Pumps": {"hvac"},
+    "Light Commercial HVAC": {"hvac"},
+    "Pool Pumps": {"pool_spa"},
+    "Residential Electric Cooking Products": {"appliance_repair"},
+    "Room Air Cleaners and Purifiers": {"hvac"},
+    "Room Air Conditioners": {"hvac", "appliance_repair"},
+    "Uninterruptible Power Supplies": {"electrical"},
+    "Ventilating Fans": {"hvac", "electrical"},
+    "Water Heaters - Non Solar Electric and Non Solar Gas": {"plumbing"},
+    "Water Heaters - Solar Electric and Solar Gas": {"plumbing"},
+}
+
+
+def category_trades(category):
+    return set(CATEGORY_TRADES.get(category or "", set()))
+
+
+def brand_trades(conn, brand_id):
+    """The brand's trades; an empty set is any trade (a brand added before P23)."""
+    rows = _rows(conn, "SELECT trades FROM brands WHERE id = %s", (brand_id,))
+    return set(rows[0][0] or []) if rows else set()
+
+
+def in_trades(category, trades):
+    return not trades or bool(category_trades(category) & trades)
+
+
 # ---------------------------------------------------------------- coverage
 
 def families(conn, brand_id):
-    """[(family, category, covered)] of the brand's listed model families."""
+    """[(family, category, covered)] of the brand's listed model families, in its trades (P23)."""
     maker = brand_manufacturer(conn, brand_id)
-    return _rows(conn, "SELECT f.family, f.category, " + _COVERED_SQL + " FROM (SELECT brand_id, family, "
-                       "min(category) AS category FROM public_models WHERE brand_id = %(brand)s GROUP BY brand_id, family) f "
-                       "ORDER BY f.family", {"maker": maker, "brand": brand_id})
+    trades = brand_trades(conn, brand_id)
+    return [row for row in _rows(conn, "SELECT f.family, f.category, " + _COVERED_SQL + " FROM (SELECT brand_id, family, "
+                                       "min(category) AS category FROM public_models WHERE brand_id = %(brand)s GROUP BY "
+                                       "brand_id, family) f ORDER BY f.family", {"maker": maker, "brand": brand_id})
+            if in_trades(row[1], trades)]
 
 
 def uncovered(conn, brand_id):

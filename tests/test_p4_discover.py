@@ -52,7 +52,8 @@ def test_discovery_makes_one_web_search_call_with_the_agreed_limits(runtime_conn
     run_discover(runtime_conn, fake, name)
     calls = fake.discover_calls()
     assert len(calls) == 1
-    _, model, brand, max_uses, max_tokens = calls[0]
+    _, model, brand, max_uses, max_tokens, trades = calls[0]
+    assert trades == []  # a brand with no trades (P23)
     assert model == HAIKU and brand == name
     assert max_uses == 8
     assert isinstance(max_tokens, int) and 0 < max_tokens

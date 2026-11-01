@@ -106,6 +106,12 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             " SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s) "
             "AND " + HAS_NO_DOCUMENT_SQL,
             (alias_key(brand_name), alias_key(brand_name)))]
+        from crawler.coverage import brand_trades, in_trades
+        trades = brand_trades(conn, brand_id)
+        if trades:  # P23: only families whose ENERGY STAR category is in the brand's trades
+            listed = dict(_rows(conn, "SELECT family, min(category) FROM public_models WHERE brand_id = %s GROUP BY family",
+                                (brand_id,)))
+            keys = [k for k in keys if in_trades(listed.get(family(k)), trades)]
         for fam in sorted({family(k) for k in keys}):
             if used >= max_searches or (limit is not None and summary["searched"] >= limit):
                 return summary

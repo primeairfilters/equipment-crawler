@@ -172,10 +172,46 @@ def blocked(conn, document_id, lock=False):
         return "the document is not tagged yet"
     if doc_type == "not_equipment":
         return "the document is not about equipment"
+    if _rows(conn, "SELECT 1 FROM documents d WHERE d.id = %s AND " + _OFF_TRADE, (document_id,)):
+        return OFF_TRADE_REASON
     if _rows(conn, "SELECT 1 FROM documents d JOIN documents w ON " + _SAME_FORM + " AND w.state = 'live' "
                    "AND (w.form_rev, w.id) > (d.form_rev, d.id) WHERE d.id = %s LIMIT 1", (document_id,)):
         return "a newer revision of its form is live"
     return None
+
+
+# P23 (D88): a manual whose tagged trade is none of its brands' trades stays out of Breeze. The brands are the ones
+# whose crawl found it; a brand with no trades (one added before P23, the uploads brand) takes any trade.
+OFF_TRADE_REASON = "its trade is not one of its brand's trades"
+_OFF_TRADE = ("d.trade IS NOT NULL AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id "
+              "WHERE du.document_id = d.id) AND NOT EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = "
+              "du.page_id JOIN brands b ON b.id = p.brand_id WHERE du.document_id = d.id AND (cardinality(b.trades) = 0 "
+              "OR d.trade = ANY (b.trades)))")
+TRADES_BY = "trades"  # visibility_log.by_whom for what follow_trades does
+
+
+def follow_trades(conn):
+    """After the brands' trades changed (P23): a live manual now outside them leaves Breeze, and one this took out
+    comes back once its trade is in again. Its build is kept either way, so coming back needs no tagging or build.
+    Only manuals this function took out are brought back (their last visibility_log line is by TRADES_BY)."""
+    out = {"withdrawn": 0, "restored": 0}
+    for (document_id,) in _rows(conn, "SELECT d.id FROM documents d WHERE d.state = 'live' AND EXISTS (SELECT 1 FROM "
+                                      "sections s WHERE s.document_id = d.id AND s.is_live) AND " + _OFF_TRADE +
+                                " ORDER BY d.id"):
+        _exec(conn, "UPDATE sections SET is_live = false WHERE document_id = %s AND is_live", (document_id,))
+        _log(conn, "document", document_id, True, OFF_TRADE_REASON, TRADES_BY)
+        out["withdrawn"] += 1
+    for document_id, build_number in _rows(
+            conn, "SELECT d.id, d.live_build FROM documents d WHERE d.state = 'live' AND d.live_build IS NOT NULL AND "
+                  "NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.is_live) AND (SELECT v.by_whom "
+                  "FROM visibility_log v WHERE v.target_type = 'document' AND v.target_id = d.id ORDER BY v.id DESC "
+                  "LIMIT 1) = %s ORDER BY d.id", (TRADES_BY,)):
+        if blocked(conn, document_id, lock=True) is None:
+            _exec(conn, "UPDATE sections SET is_live = true WHERE document_id = %s AND build = %s",
+                  (document_id, build_number))
+            _log(conn, "document", document_id, False, "its trade is one of its brand's trades again", TRADES_BY)
+            out["restored"] += 1
+    return out
 
 
 # another version of d's form (migration 0008): same manufacturer, form base and language

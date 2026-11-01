@@ -1,0 +1,355 @@
+# Brands for "./crawl add-brands ops/brands-2026-10-31.txt" (P23): one per line, "name | trades". Every one is added paused.
+3M Aqua-Pure | water_treatment
+A.O. Smith | plumbing, water_treatment
+AAON | hvac
+ABB | electrical
+Acuity Brands | electrical
+Addison | hvac
+Airedale | hvac
+Airtemp | hvac
+Albany Doors | garage_doors
+Allen-Bradley | electrical
+Allied Air Enterprises | hvac
+Allstar | garage_doors
+Amana | hvac, appliance_repair
+Amarr | garage_doors
+American Panel | commercial_refrigeration
+American Standard | hvac, plumbing
+American Water Heaters | plumbing
+Ankmar | garage_doors
+Apollo Valves | plumbing
+Appleton | electrical
+Aqua Systems | water_treatment
+AquaCal | pool_spa
+Aquasana | water_treatment
+AquaStar | pool_spa
+Aquatherm | plumbing
+AquaTru | water_treatment
+Arcoaire | hvac
+Arctic Spas | pool_spa
+Arlington Industries | electrical
+Arm-R-Lite | garage_doors
+Armstrong Air | hvac
+Armstrong Fluid Technology | plumbing
+ASCO Power Technologies | electrical
+Asko | appliance_repair
+ASSA ABLOY | garage_doors
+Atlas Copco | generators
+AutoPilot | pool_spa
+Avanti | appliance_repair
+Axeon Water | water_treatment
+B-Line | electrical
+Baker Door | garage_doors
+Baldor | electrical, generators
+Bally | commercial_refrigeration
+Baltimore Aircoil Company | hvac
+Bard | hvac
+Bell & Gossett | plumbing
+Bemis | plumbing
+Bertazzoni | appliance_repair
+Beverage-Air | commercial_refrigeration
+BITZER | commercial_refrigeration
+Blue Star Power Systems | generators
+Blue-White Industries | pool_spa
+Bohn | commercial_refrigeration
+Bosch | hvac, appliance_repair
+Bradford White | plumbing
+Briggs & Stratton | generators
+Broan | appliance_repair
+Bryant | hvac
+Bullfrog Spas | pool_spa
+Burks | plumbing
+Bussmann | electrical
+C.H.I. Overhead Doors | garage_doors
+Café | appliance_repair
+Cal Spas | pool_spa
+Caldera Spas | pool_spa
+Canature | water_treatment
+CaptiveAire | hvac
+Carel | commercial_refrigeration
+Carrier | hvac
+Caterpillar | generators
+Chamberlain | garage_doors
+Champion Power Equipment | generators
+Chemtrol | pool_spa
+Chicago Faucets | plumbing
+Clack Corporation | water_treatment
+ClimateMaster | hvac
+Clopay | garage_doors
+CMP | pool_spa
+Coast Spas | pool_spa
+ColdZone | commercial_refrigeration
+Coleman | hvac
+Comfortmaker | hvac
+Continental Refrigerator | commercial_refrigeration
+Copeland | commercial_refrigeration
+CornellCookson | garage_doors
+Crosley | appliance_repair
+Crouse-Hinds | electrical
+CrownTonka | commercial_refrigeration
+Culligan | water_treatment
+Cummins | generators
+Dacor | appliance_repair
+Daikin | hvac
+Daikin Applied | hvac
+Danby | appliance_repair
+Danfoss | electrical, commercial_refrigeration
+Deep Sea Electronics | generators
+DEIF | generators
+Delden | garage_doors
+Delfield | commercial_refrigeration
+Delta Faucet | plumbing
+Dimension One Spas | pool_spa
+DoorKing | garage_doors
+DoorLink | garage_doors
+Doosan Portable Power | generators
+Ducane | hvac
+Dunham-Bush | hvac
+Dynaco | garage_doors
+Eaton | electrical
+Ebara | plumbing
+EcoWater Systems | water_treatment
+Electrolux | appliance_repair
+Elkay | plumbing
+Embraco | commercial_refrigeration
+Emerson | electrical
+Endless Pools | pool_spa
+Entrematic | garage_doors
+Evapco | hvac
+Everest Refrigeration | commercial_refrigeration
+Everpure | water_treatment
+Excalibur Water Systems | water_treatment
+FAAC | garage_doors
+Faber | appliance_repair
+Federal Industries | commercial_refrigeration
+Federal Pacific | electrical
+Fernco | plumbing
+Fisher & Paykel | appliance_repair
+Fleck | water_treatment
+Fluidra | pool_spa
+Fogel | commercial_refrigeration
+Foster Refrigerator | commercial_refrigeration
+FPT Industrial | generators
+Franklin Electric | plumbing, electrical
+Frascold | commercial_refrigeration
+Frigidaire | appliance_repair
+Fujitsu | hvac
+GE Appliances | appliance_repair
+GE Vernova | electrical
+Generac | electrical, generators
+Genie | garage_doors
+Gerber Plumbing | plumbing
+Gillette Generators | generators
+Goodman | hvac
+Goulds Water Technology | plumbing
+Gree | hvac
+Greenheck | hvac
+Greenlee | electrical
+Grohe | plumbing
+Grundfos | plumbing
+Haas Door | garage_doors
+Haier | hvac, appliance_repair
+Hansgrohe | plumbing
+Hayward | pool_spa
+Heatcraft | commercial_refrigeration
+Heil | hvac
+Hellenbrand | water_treatment
+Highly | commercial_refrigeration
+Hisense | appliance_repair
+Hitachi | hvac
+Honda | generators
+Hoshizaki | commercial_refrigeration, appliance_repair
+Hot Spring | pool_spa
+Hotpoint | appliance_repair
+Hubbell | electrical
+Hussmann | commercial_refrigeration
+Hörmann | garage_doors
+Ideal Door | garage_doors
+IKEA | appliance_repair
+Imbera | commercial_refrigeration
+Imperial Brown | commercial_refrigeration
+Innovent | hvac
+Insignia | appliance_repair
+InSinkErator | plumbing
+ITE | electrical
+Jacuzzi | plumbing, pool_spa
+Jandy | pool_spa
+Janus International | garage_doors
+JennAir | appliance_repair
+Johnson Controls | hvac, commercial_refrigeration
+Kelley | garage_doors
+Kenmore | appliance_repair
+Kinetico | water_treatment
+KitchenAid | appliance_repair
+Kohler | plumbing, generators
+Kolpak | commercial_refrigeration
+KSB | plumbing
+Kulthorn | commercial_refrigeration
+Kysor Warren | commercial_refrigeration
+LaMotte | pool_spa
+Lancaster Water Group | water_treatment
+Leeson | electrical
+Legrand | electrical
+Lennox | hvac
+Leroy-Somer | generators
+Leviton | electrical
+LG | hvac, appliance_repair
+Liberty Pumps | plumbing
+LiftMaster | garage_doors
+Linear | garage_doors
+Little Giant | plumbing
+Lutron | electrical
+Magic Chef | appliance_repair
+Magic-Pak | hvac
+Mammoth | hvac
+Marantec | garage_doors
+Marathon Electric | electrical, generators
+Marquis Spas | pool_spa
+Martin Door | garage_doors
+Marvel | appliance_repair
+Master Spas | pool_spa
+Master-Bilt | commercial_refrigeration
+Maytronics | pool_spa
+McGuire | garage_doors
+Mecc Alte | generators
+Mersen | electrical
+Midland Garage Door | garage_doors
+Miele | appliance_repair
+Minus Forty | commercial_refrigeration
+Mitsubishi Electric | hvac, electrical
+MMD Equipment | generators
+Modine | hvac
+Moen | plumbing
+Monogram | appliance_repair
+MTU | generators
+Multiquip | generators
+Munters | hvac
+Myers Power Products | electrical
+Napoleon | hvac
+Navien | plumbing
+Nice | garage_doors
+Noritz | plumbing
+Norlake | commercial_refrigeration
+Nortek | hvac
+Nortek Air Solutions | hvac
+Northwest Door | garage_doors
+Novo Water Conditioning | water_treatment
+nVent | electrical
+Oatey | plumbing
+Omron | electrical
+Overhead Door Corporation | garage_doors
+Oxbox | hvac
+Panasonic | hvac, electrical, appliance_repair
+Parker Sporlan | commercial_refrigeration
+Payne | hvac
+Pentair | plumbing, pool_spa, water_treatment
+Perkins | generators
+Perlick | commercial_refrigeration, appliance_repair
+PEXGUY | plumbing
+Pfister | plumbing
+Philips | electrical
+Polar King | commercial_refrigeration
+Polaris | pool_spa
+Pramac | generators
+Premier | appliance_repair
+ProMinent | pool_spa
+RAB Lighting | electrical
+RainSoft | water_treatment
+Randell | commercial_refrigeration
+Raynor | garage_doors
+Raypak | pool_spa
+Rehlko | generators
+RenewAire | hvac
+Rheem | hvac, plumbing, pool_spa
+Richards-Wilcox | garage_doors
+Rinnai | plumbing
+Rockwell Automation | electrical
+Rolls-Royce Power Systems | generators
+Russell | commercial_refrigeration
+Ruud | hvac, plumbing
+Rytec | garage_doors
+Samsung | hvac, appliance_repair
+Sanhua | commercial_refrigeration
+Schneider Electric | electrical
+Scotsman | commercial_refrigeration, appliance_repair
+Secop | commercial_refrigeration
+Senville | hvac
+SEW-Eurodrive | electrical
+Sharp | appliance_repair
+Siemens | electrical
+Silver King | commercial_refrigeration
+Sloan | plumbing
+Sommer | garage_doors
+SpacePak | hvac
+Speakman | plumbing
+Speck Pumps | pool_spa
+Speed Queen | appliance_repair
+SpringWell | water_treatment
+Square D | electrical
+Sta-Rite | pool_spa
+Stamford | generators
+State Water Heaters | plumbing
+Structural Concepts | commercial_refrigeration
+Sub-Zero | appliance_repair
+Sulzer | plumbing
+Summit Appliance | appliance_repair
+Sundance Spas | pool_spa
+Swegon | hvac
+T&S Brass | plumbing
+Taco | plumbing
+Taylor Power Systems | generators
+Taylor Technologies | pool_spa
+Tecumseh | commercial_refrigeration
+Tempstar | hvac
+Thermador | appliance_repair
+ThermalRite | commercial_refrigeration
+ThermoSpas | pool_spa
+Thomas & Betts | electrical
+Thor Kitchen | appliance_repair
+TKO | garage_doors
+TMI | garage_doors
+Toshiba | electrical
+Toto | plumbing
+Trane | hvac
+Tripp Lite | electrical
+True Manufacturing | commercial_refrigeration
+True Residential | appliance_repair
+Turbo Air | commercial_refrigeration
+U-Line | appliance_repair
+U.S. Cooler | commercial_refrigeration
+Uponor | plumbing
+Valent | hvac
+Ventacity | hvac
+Vertiv | electrical
+Victory Refrigeration | commercial_refrigeration
+Viega | plumbing
+Viking | appliance_repair
+Viking Access Systems | garage_doors
+Viking Spas | pool_spa
+Viqua | water_treatment
+Wacker Neuson | generators
+WaterCare | water_treatment
+Waterco | pool_spa
+WaterGuru | pool_spa
+Watts | plumbing, water_treatment
+Wayne Dalton | garage_doors
+WEG | electrical
+Westinghouse | generators
+Whirlpool | appliance_repair
+Whirlpool Water Solutions | water_treatment
+Wilo | plumbing
+Winco | generators
+Windsor Door | garage_doors
+Wolf | appliance_repair
+Wolverine Brass | plumbing
+Woodward | generators
+XO Appliance | appliance_repair
+Xylem | plumbing
+Yanmar | generators
+Yaskawa | electrical
+York | hvac
+Zero Zone | commercial_refrigeration
+ZLINE | appliance_repair
+Zodiac | pool_spa
+Zoeller | plumbing
+Zurn | plumbing

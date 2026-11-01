@@ -117,7 +117,8 @@ def discover(conn, client, brand_name, *, now=None, cap_usd=None):
     if ai.monthly_spend(conn, now) + reserved + worst > cap:
         return "budget"
 
-    reply = client.discover(model, brand_name, MAX_USES, MAX_TOKENS)
+    trades = _rows(conn, "SELECT trades FROM brands WHERE id = %s", (brand_id,))[0][0] or []
+    reply = client.discover(model, brand_name, MAX_USES, MAX_TOKENS, trades=trades)
     answer = reply.output if isinstance(reply.output, dict) else None
     _exec(conn,
           "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "

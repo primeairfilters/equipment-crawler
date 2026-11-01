@@ -24,8 +24,8 @@ class Discovering(Both):
     def supports_web_search(self, model):
         return self.discovery.supports_web_search(model)
 
-    def discover(self, *a):
-        return self.discovery.discover(*a)
+    def discover(self, *a, **k):
+        return self.discovery.discover(*a, **k)
 
     def discovered(self):
         return [c[2] for c in self.discovery.calls if c[0] == "discover"]
