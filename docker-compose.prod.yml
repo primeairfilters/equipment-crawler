@@ -1,8 +1,8 @@
 # The crawler on the prod server (EQUIPMENT_DATA_CRAWLER.md D86, P22). Used instead of docker-compose.yml there,
 # chosen by a .env file in this folder on the server holding COMPOSE_FILE=docker-compose.prod.yml (gitignored), so
 # ./crawl and setup/ work as on the Mac. Not an export in the shell: that would change ~/HVACApp's compose too.
-# Differences from the Mac's file: no published port (PostgreSQL is reached only on the Docker network, where
-# Tracforce's admin-app joins it as host `pg`), originals in S3 only (aws.env sets DOCS_BUCKET), the rebuildable
+# Differences from the Mac's file: the port is published on the server's own 127.0.0.1 only (Tracforce's admin-app
+# reaches it on the Docker network as host `pg`; Claude's read-only login through an SSH tunnel), originals in S3 only (aws.env sets DOCS_BUCKET), the rebuildable
 # caches in a named volume instead of a Mac folder, and memory caps sized so a heavy night stops the crawler,
 # never the app (measured 2026-10-30: crawler 390 MiB, pg 204 MiB at peak on a 77-page scan).
 # Secrets live in ~/.config/tracforce-crawler/ on the server, never here.
@@ -23,6 +23,8 @@ services:
       retries: 30
     restart: unless-stopped
     mem_limit: 1g
+    ports:
+      - "127.0.0.1:5433:5432"  # the server itself only: Claude's read-only checks arrive through an SSH tunnel (claude_ro)
     networks:
       - crawler-net
 
