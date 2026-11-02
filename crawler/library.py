@@ -1,6 +1,8 @@
 """The document library: every fetched original is kept once as <sha256>.<ext>, never replaced (D26, D57).
 
-PDFs are <sha>.pdf, HTML pages <sha>.html and JSON feed responses <sha>.json.
+PDFs are <sha>.pdf, HTML pages <sha>.html and JSON feed responses <sha>.json. Uploaded spreadsheets are <sha>.xlsx
+and <sha>.csv, Word and PowerPoint <sha>.docx and <sha>.pptx, saved web pages <sha>.html and <sha>.mht, photos
+<sha>.jpg and <sha>.png (EQUIPMENT_FILE_UPLOADS.md; the document's file_type says which).
 
 Where they live (D80): in AWS S3 when DOCS_BUCKET is set (the bucket `tracforce-equipment-docs`), else in the local
 folder DOCS_DIR (tests, and the library before S3). The rebuildable caches (.layout, .ocr, .eval) stay in DOCS_DIR
@@ -19,7 +21,7 @@ import os
 import re
 
 _s3 = None  # the boto3 client, made on first use (tests put a fake here)
-ORIGINAL = re.compile(r"[0-9a-f]{64}\.(pdf|html|json)")
+ORIGINAL = re.compile(r"[0-9a-f]{64}\.(pdf|html|json|xlsx|csv|docx|pptx|mht|jpg|png)")
 
 
 class LibraryError(Exception):
@@ -52,7 +54,11 @@ def configured():
 
 
 EXTENSIONS = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "html", "application/json": "json"}
-TYPES = {"pdf": "application/pdf", "html": "text/html", "json": "application/json"}
+TYPES = {"pdf": "application/pdf", "html": "text/html", "json": "application/json",
+         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "csv": "text/csv",
+         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+         "mht": "multipart/related", "jpg": "image/jpeg", "png": "image/png"}
 
 
 def has_file(content_sha, ext="pdf"):

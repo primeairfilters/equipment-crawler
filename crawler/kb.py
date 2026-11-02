@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from crawler import clock, library, textextract
 from crawler.brands import UnknownTarget
 from crawler.sections import SECTIONER_VERSION, build_sections, terms
+from crawler.filereaders import layout as file_layout
+from crawler.sheets import SHEET_TYPES, sheet_sections
 from crawler.store import alias_key
 from crawler.textextract import LAYOUT_TIMEOUT_SECONDS, ExtractError, extract_layout
 
@@ -54,8 +56,9 @@ def document_pages(conn, document_id, problems=None, original=None):
     could not be read, (document id, why) goes into problems: a fallback loses headings and tables, so it must show.
     original: read_original's answer when the caller read it already (build_and_publish reads ahead)."""
     if original is None:
-        sha, page_count = _rows(conn, "SELECT content_sha, page_count FROM documents WHERE id = %s", (document_id,))[0]
-        original = read_original(sha, page_count)
+        sha, page_count, file_type = _rows(conn, "SELECT content_sha, page_count, file_type FROM documents WHERE id = %s",
+                                           (document_id,))[0]
+        original = read_original(sha, page_count, file_type)
     if isinstance(original, ExtractError):
         if problems is not None:
             problems.append((document_id, str(original)))
@@ -73,13 +76,16 @@ def document_pages(conn, document_id, problems=None, original=None):
 NO_ORIGINAL = object()  # read_original: the library does not have the PDF
 
 
-def read_original(sha, page_count):
+def read_original(sha, page_count, file_type="pdf"):
     """The PDF's layout from the library, the ExtractError when it could not be read, or NO_ORIGINAL. Needs no database,
-    so several can run at once. The time limit grows with the page count (a 69-page capacity chart takes about 140 s)."""
-    data = library.read(sha) if library.configured() else None
+    so several can run at once. The time limit grows with the page count (a 69-page capacity chart takes about 140 s).
+    Any other uploaded file gives its layout from crawler/filereaders.py (a spreadsheet: its lines per sheet)."""
+    data = library.read(sha, file_type) if library.configured() else None
     if data is None:
         return NO_ORIGINAL
     try:
+        if file_type != "pdf":
+            return file_layout(data, file_type)
         return extract_layout(data, timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)))
     except ExtractError as exc:
         return exc
@@ -94,13 +100,13 @@ def build(conn, document_id, *, pages=None, problems=None, original=None):
     exactly these sections (text, pages, path, kind, flags and search terms): under a newer sectioner version that build
     only takes the new version, keeping its rows, so it stays live and keeps its vectors. original: the PDF already
     read (see document_pages)."""
-    doc = _rows(conn, "SELECT manufacturer_id, trade, equipment_type, doc_type, language, state FROM documents "
+    doc = _rows(conn, "SELECT manufacturer_id, trade, equipment_type, doc_type, language, state, file_type FROM documents "
                       "WHERE id = %s", (document_id,))
     if not doc:
         raise UnknownTarget(f"No document {document_id}.")
     filters = dict(zip(FILTERS, doc[0][:5]))
-    sections = build_sections(document_pages(conn, document_id, problems=problems, original=original)
-                              if pages is None else pages)
+    cut = sheet_sections if doc[0][6] in SHEET_TYPES else build_sections  # a spreadsheet: its rows under each sheet
+    sections = cut(document_pages(conn, document_id, problems=problems, original=original) if pages is None else pages)
     own = "(SELECT substr(f, 6) FROM unnest(flags) f WHERE f LIKE 'lang:%%' LIMIT 1)"  # a section's own language wins
     _exec(conn, f"UPDATE sections SET manufacturer_id = %s, trade = %s, equipment_type = %s, doc_type = %s, "
                 f"language = COALESCE({own}, %s) WHERE document_id = %s AND (manufacturer_id, trade, equipment_type, "
@@ -220,21 +226,24 @@ _SAME_FORM = ("w.id <> d.id AND w.manufacturer_id = d.manufacturer_id AND w.form
 
 
 def publish(conn, document_id, build=None):
-    """(True, None) when the build (default: the newest) is live, else (False, why)."""
+    """(True, None) when the build (default: the newest) is live, else (False, why). Why is kept on the document
+    (held_reason) until it goes live, for the admin page's "Held back" (control.upload_live)."""
     reason = blocked(conn, document_id, lock=True)
-    if reason:
-        return False, reason
-    if build is None:
+    if build is None and not reason:
         build = _rows(conn, "SELECT MAX(build) FROM sections WHERE document_id = %s", (document_id,))[0][0]
-    if build is None or not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s AND build = %s LIMIT 1",
-                                  (document_id, build)):
-        return False, "it has no sections in that build"
+    if not reason and (build is None or not _rows(conn, "SELECT 1 FROM sections WHERE document_id = %s AND build = %s "
+                                                        "LIMIT 1", (document_id, build))):
+        reason = "it has no sections in that build"
+    if reason:
+        _exec(conn, "UPDATE documents SET held_reason = %s WHERE id = %s AND held_reason IS DISTINCT FROM %s",
+              (reason, document_id, reason))
+        return False, reason
     _exec(conn, "SAVEPOINT publish")
     try:
         _exec(conn, "UPDATE sections SET is_live = (build = %s) WHERE document_id = %s AND is_live IS DISTINCT FROM (build = %s)",
               (build, document_id, build))
-        _exec(conn, "UPDATE documents SET live_build = %s, state = 'live', updated_at = (now() AT TIME ZONE 'UTC') "
-                    "WHERE id = %s", (build, document_id))
+        _exec(conn, "UPDATE documents SET live_build = %s, state = 'live', held_reason = NULL, "
+                    "updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s", (build, document_id))
         old = _rows(conn, "SELECT replaces_id FROM documents WHERE id = %s", (document_id,))[0][0]
         # the version it replaces, and every lower revision of its form still live (one found after it, doc 840)
         retire = {old} - {None} | {r[0] for r in _rows(
@@ -278,7 +287,7 @@ def build_and_publish(conn, *, brand_id=None, after_document=None, workers=1):
         summary["live" if ok else "held"] += 1
         if after_document:
             after_document()
-    files = {d: r for d, *r in _rows(conn, "SELECT id, content_sha, page_count FROM documents WHERE id = ANY(%s)",
+    files = {d: r for d, *r in _rows(conn, "SELECT id, content_sha, page_count, file_type FROM documents WHERE id = ANY(%s)",
                                        ([d for (d,) in docs],))}
     workers = max(1, workers)
     pool = ThreadPoolExecutor(max_workers=workers)  # each read is its own child process
@@ -439,12 +448,14 @@ def not_duplicates(conn, one, two, *, reason, by_whom="user"):
 # ---------------------------------------------------------------- check
 
 def _missing_originals(conn):
-    """Live documents whose original PDF is not in the library (S3 or the local folder): they cannot be rebuilt."""
+    """Live documents whose original (<sha>.<file type>) is not in the library (S3 or the local folder): they cannot be
+    rebuilt."""
     if not library.configured():
         return []
     stored = library.stored_keys()
-    return [d for d, sha in _rows(conn, "SELECT id, content_sha FROM documents WHERE state = 'live' ORDER BY id")
-            if f"{sha}.pdf" not in stored]
+    return [d for d, sha, file_type in _rows(conn, "SELECT id, content_sha, file_type FROM documents WHERE state = 'live' "
+                                                   "ORDER BY id")
+            if f"{sha}.{file_type}" not in stored]
 
 
 DUPLICATE_OVERLAP = 0.6  # Ruud 2026-10-29: real pairs share 0.64-0.99 of their text, a shared generic title 0.29-0.52

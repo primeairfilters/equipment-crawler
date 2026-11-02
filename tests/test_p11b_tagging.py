@@ -35,7 +35,8 @@ def tagged(conn, answer, lines=TEXT):
 def test_the_schema_asks_for_every_tag():
     from crawler.extract import DOC_TYPES, EQUIPMENT_TYPES, OUTPUT_SCHEMA, TRADES
     props = OUTPUT_SCHEMA["properties"]
-    assert set(props) == {"doc_type", "models", "trade", "equipment_type", "language", "form_number", "title"}
+    # brand: user 2026-11-01, for an upload nothing else named a brand for (test_upload_brand.py)
+    assert set(props) == {"doc_type", "models", "trade", "equipment_type", "language", "form_number", "title", "brand"}
     assert set(OUTPUT_SCHEMA["required"]) == set(props) and OUTPUT_SCHEMA["additionalProperties"] is False
     assert "not_equipment" in DOC_TYPES and props["doc_type"]["enum"] == DOC_TYPES
     assert props["trade"]["enum"] == TRADES and "hvac" in TRADES

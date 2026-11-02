@@ -221,7 +221,8 @@ def report(conn, now=None):
     now = now or _now()
     _link(conn)
     rows = _rows(conn, "SELECT i.kind, i.id, i.content_sha, i.document_id, d.title, m.name, d.page_count, d.canonical_url, "
-                       "i.detail, i.times_seen, i.first_seen_at, i.seen_version FROM parse_issues i "
+                       "i.detail, i.times_seen, i.first_seen_at, i.seen_version, "
+                       "COALESCE(d.file_type, i.detail ->> 'file_type', 'pdf') FROM parse_issues i "
                        "LEFT JOIN documents d ON d.id = i.document_id LEFT JOIN manufacturers m ON m.id = d.manufacturer_id "
                        "WHERE i.state = 'open' ORDER BY i.kind, i.id")
     versions = {c: version(c) for c in ("reader", "tagger", "sectioner")}
@@ -231,7 +232,7 @@ def report(conn, now=None):
              "(the reader's from its files, the tagger's EXTRACTOR_VERSION, the sectioner's SECTIONER_VERSION), and the "
              "next nightly run takes these documents again and marks each fixed or still open.", "",
              f"Versions now: reader `{versions['reader']}`, tagger `{versions['tagger']}`, sectioner "
-             f"`{versions['sectioner']}`. Originals are in the docs bucket (or DOCS_DIR) as `<sha256>.pdf`.", ""]
+             f"`{versions['sectioner']}`. Originals are in the docs bucket (or DOCS_DIR) as `<sha256>.<type>` (pdf, xlsx, csv, docx, pptx, html, mht, jpg, png).", ""]
     if not rows:
         lines.append("Nothing open.")
     by_kind = {}
@@ -240,11 +241,11 @@ def report(conn, now=None):
     for kind, items in by_kind.items():
         component, meaning, where = KINDS[kind]
         lines += [f"## {kind} ({len(items)})", "", meaning, "", f"Part: {component}. Usually fixed in: {where}.", ""]
-        for (_, issue_id, sha, document_id, title, brand, pages, url, detail, seen, first, seen_version) in items:
+        for (_, issue_id, sha, document_id, title, brand, pages, url, detail, seen, first, seen_version, file_type) in items:
             lines.append(f"### Issue {issue_id}: document {document_id if document_id is not None else '(none yet)'}"
                          + (f", {title}" if title else ""))
             lines.append("")
-            lines.append(f"- Original: `{sha}.pdf`" + (f" (found at {url})" if url else ""))
+            lines.append(f"- Original: `{sha}.{file_type}`" + (f" (found at {url})" if url else ""))
             if brand or pages is not None:
                 lines.append(f"- Brand: {brand or 'none'}; pages read: {pages if pages is not None else 'none'}")
             lines.append(f"- Seen {seen} time(s) since {first:%Y-%m-%d}, last under version `{seen_version}`")

@@ -1,12 +1,16 @@
 """P19 (D84): documents uploaded by hand on the admin page. Each queued control.uploads row:
 
 1. Its file is read from inbox/ (the docs bucket, or DOCS_DIR/inbox without one). Missing, over MAX_PDF_BYTES, not a
-   PDF, or unreadable: 'rejected' with the reason.
+   file it reads, a price sheet, unreadable, or with nothing to read: 'rejected' with the reason. It reads PDFs (by their
+   content), and spreadsheets, Word, PowerPoint, saved web pages and photos (by their name; EQUIPMENT_FILE_UPLOADS.md,
+   crawler/filereaders.py).
 2. A file already stored (same sha256): 'already_had' with its document; a brand picked on the page is added to it.
 3. Otherwise the original is stored once under its sha256 like any crawled PDF, and a page row carries it through
-   text, tagging and sections: under the brand picked on the page; else the brand its text names most (at least
+   text, tagging and sections: under the brand picked on the page; else the one brand its file name names (user
+   2026-11-01: "Fujitsu AirStage H-Series – Document Links.xlsx"); else the brand its text names most (at least
    MIN_MENTIONS times and more than any other, user 2026-10-29); else no brand, under the stopped UPLOADS_BRAND, which
-   is never crawled. 'added' with its document. An upload is trusted: no host check.
+   is never crawled, and the AI may name it when it tags the file (extract.upload_brand). 'added' with its document.
+   An upload is trusted: no host check.
 
 The page row's address (upload://<id>/<file name>) is never fetched: it has no start address and no recheck date.
 A row left 'processing' by a crash is taken again. Nothing here commits; after_upload runs after each one.
@@ -18,6 +22,8 @@ from urllib.parse import quote
 from crawler import library
 from crawler.documents import record_pdf
 from crawler.fetch import MAX_PDF_BYTES
+from crawler.filereaders import extract, file_type as _file_type, nothing_to_read
+from crawler.sheets import SHEET_TYPES, price_sheet
 from crawler.store import alias_key, brand_manufacturer
 from crawler.textextract import ExtractError, extract_pdf, index_page
 
@@ -72,8 +78,11 @@ def _take(conn, upload_id, key, name, crawl_brand):
         return "rejected", f"the file is not in the inbox ({key})", None, None
     if len(body) > MAX_PDF_BYTES:
         return "rejected", f"larger than {MAX_PDF_BYTES // (1024 * 1024)} MB", None, None
-    if not body.startswith(b"%PDF-"):
-        return "rejected", "not a PDF", None, None
+    file_type = _file_type(body, name)
+    if file_type is None:
+        return "rejected", "not a PDF" if name.lower().endswith(".pdf") else "not a file Tracforce reads", None, None
+    if file_type in SHEET_TYPES and price_sheet(name):
+        return "rejected", "a price sheet", None, None
     sha = hashlib.sha256(body).hexdigest()
     stored = _rows(conn, "SELECT id FROM documents WHERE content_sha = %s", (sha,))
     if stored:
@@ -82,30 +91,40 @@ def _take(conn, upload_id, key, name, crawl_brand):
                         "ON CONFLICT DO NOTHING", (stored[0][0], brand_manufacturer(conn, crawl_brand)))
         return "already_had", None, stored[0][0], sha
     try:
-        found = extract_pdf(body)
+        found = extract_pdf(body) if file_type == "pdf" else extract(body, file_type)
     except ExtractError as exc:
         from crawler import issues
         issues.record(conn, sha, "unreadable", {"error": str(exc), "reader said": exc.detail, "bytes": len(body),
-                                                "upload_id": upload_id, "file_name": name})  # queued again after a fix
-        return "rejected", f"could not be read as a PDF ({str(exc)[:120]})", None, sha
-    library.save(body, "pdf")  # LibraryError: the row stays 'processing' and the next run takes it again
+                                                "upload_id": upload_id, "file_name": name,
+                                                "file_type": file_type})  # queued again after a fix
+        what = "a PDF" if file_type == "pdf" else "a spreadsheet" if file_type in SHEET_TYPES else f"a .{file_type} file"
+        return "rejected", f"could not be read as {what} ({str(exc)[:120]})", None, sha
+    empty = None if file_type == "pdf" else nothing_to_read(found, file_type)
+    if empty:
+        return "rejected", empty, None, sha
+    library.save(body, file_type)  # LibraryError: the row stays 'processing' and the next run takes it again
     if crawl_brand is not None:
         brand_id, maker = crawl_brand, brand_manufacturer(conn, crawl_brand)
     else:
-        brand_id, maker = named_brand(conn, "\n".join(found.pages))
+        brand_id, maker = named_brand(conn, re.sub(r"[_.]+", " ", name.rsplit(".", 1)[0]), min_mentions=1)
+        if brand_id is None:
+            brand_id, maker = named_brand(conn, "\n".join(found.pages))
         brand_id = brand_id or _uploads_brand(conn)
     host_id = _rows(conn, "INSERT INTO hosts (host) VALUES (%s) ON CONFLICT (host) DO UPDATE SET host = EXCLUDED.host "
                           "RETURNING id", (UPLOADS_HOST,))[0][0]
     url = f"upload://{upload_id}/{quote(name)}"
     page_id = _rows(conn, "INSERT INTO pages (brand_id, host_id, url, url_sha, is_pdf, content_type, content_sha, "
-                          "fetched_at, fetch_state, decision, decided_by, decision_reason) VALUES (%s, %s, %s, %s, true, "
-                          "'application/pdf', %s, (now() AT TIME ZONE 'UTC'), 'fetched', 'crawl', 'user', "
+                          "fetched_at, fetch_state, decision, decided_by, decision_reason) VALUES (%s, %s, %s, %s, %s, "
+                          "%s, %s, (now() AT TIME ZONE 'UTC'), 'fetched', 'crawl', 'user', "
                           "'uploaded on the admin page') RETURNING id",
-                    (brand_id, host_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest(), sha))[0][0]
+                    (brand_id, host_id, url, hashlib.sha256(url.encode("utf-8")).hexdigest(), file_type == "pdf",
+                     library.TYPES[file_type], sha))[0][0]
     _rows(conn, "UPDATE control.uploads SET page_id = %s, manufacturer_id = %s WHERE id = %s",
           (page_id, maker, upload_id))  # before record_pdf, which reads the manufacturer from here
+    # is_pdf here means "a document the AI tags": every upload is one, and found is given, so nothing is read again
     index_page(conn, page_id, body, is_pdf=True, found=found)
-    return "added", None, record_pdf(conn, brand_id, page_id, url, body), sha
+    return "added", None, record_pdf(conn, brand_id, page_id, url, body, file_type=file_type), sha
+
 
 
 def _crashed(conn, upload_id, key, name, exc):
@@ -115,7 +134,7 @@ def _crashed(conn, upload_id, key, name, exc):
     if body:
         issues.record(conn, hashlib.sha256(body).hexdigest(), "unreadable",
                       {"error": f"{exc.__class__.__name__}: {str(exc)[:500]}", "upload_id": upload_id,
-                       "file_name": name, "bytes": len(body)})
+                       "file_name": name, "bytes": len(body), "file_type": _file_type(body, name) or "pdf"})
 
 
 def _settle_issue(conn, upload_id, sha, state, reason):
@@ -130,9 +149,10 @@ def _settle_issue(conn, upload_id, sha, state, reason):
                     "WHERE state = 'retrying' AND (detail ->> 'upload_id')::bigint = %s", (upload_id,))
 
 
-def named_brand(conn, text):
+def named_brand(conn, text, min_mentions=MIN_MENTIONS):
     """(crawler brand id or None, manufacturer id or None) of the brand the text names most: the crawler's brands
-    and the manufacturers it knows, counted by whole-word mentions."""
+    and the manufacturers it knows, counted by whole-word mentions. min_mentions=1 for a short text that names a brand
+    once (a file name, the AI's answer); a tie still names none."""
     counts, makers = {}, {}
     for brand_id, name in _rows(conn, "SELECT id, name FROM brands WHERE name_key <> %s", (UPLOADS_BRAND,)):
         maker = _rows(conn, "SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s", (alias_key(name),))
@@ -143,7 +163,7 @@ def named_brand(conn, text):
         group = ("maker", maker_id)
         counts[group] = max(counts.get(group, 0), _mentions(alias, text))
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])
-    if not ranked or ranked[0][1] < MIN_MENTIONS or (len(ranked) > 1 and ranked[1][1] == ranked[0][1]):
+    if not ranked or ranked[0][1] < min_mentions or (len(ranked) > 1 and ranked[1][1] == ranked[0][1]):
         return None, None
     (kind, value), _ = ranked[0]
     brand_id = makers.get((kind, value))

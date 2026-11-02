@@ -16,8 +16,9 @@ def _rows(conn, sql, args=()):
         return cur.fetchall() if cur.description else []
 
 
-def record_pdf(conn, brand_id, page_id, url, body):
-    """The document id for this PDF, made if new. Call after the page's text is stored."""
+def record_pdf(conn, brand_id, page_id, url, body, file_type="pdf"):
+    """The document id for this PDF (or uploaded file of another type), made if new. Call after the page's text is
+    stored. Only a PDF can need OCR: a spreadsheet's text is all there is."""
     sha = hashlib.sha256(body).hexdigest()
     pages, text_pages = _rows(conn, "SELECT COUNT(*), COUNT(*) FILTER (WHERE has_text) FROM page_text WHERE page_id = %s",
                               (page_id,))[0]
@@ -31,11 +32,11 @@ def record_pdf(conn, brand_id, page_id, url, body):
     else:
         document_id = _rows(
             conn,
-            "INSERT INTO documents (content_sha, manufacturer_id, canonical_url, page_count, text_pages, needs_ocr, replaces_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (content_sha) DO UPDATE SET content_sha = EXCLUDED.content_sha "
-            "RETURNING id",
-            (sha, maker, url, pages, text_pages, text_pages < pages,
-             earlier[0][0] if earlier else None))[0][0]
+            "INSERT INTO documents (content_sha, manufacturer_id, canonical_url, page_count, text_pages, needs_ocr, replaces_id, "
+            "file_type) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (content_sha) DO UPDATE SET content_sha = "
+            "EXCLUDED.content_sha RETURNING id",
+            (sha, maker, url, pages, text_pages, file_type == "pdf" and text_pages < pages,
+             earlier[0][0] if earlier else None, file_type))[0][0]
         if earlier:  # a new version of a hidden manual stays hidden until the user says otherwise (D56)
             hidden = _rows(conn, "SELECT hidden_reason FROM documents WHERE id = %s AND hidden_at IS NOT NULL",
                            (earlier[0][0],))
@@ -61,11 +62,12 @@ def reread(conn, brand_id=None, after_document=None, documents=None):
     documents: read exactly these instead (a manual cut at an older page limit: nothing stored says it was cut).
     Fetches nothing. Each address that served it gets the page text; the document gets
     its page count and OCR flag. Returns {"read": n, "unreadable": n}."""
+    from crawler.filereaders import extract
     from crawler.textextract import ExtractError, extract_pdf, index_page
 
     if not library.configured():
         return {"read": 0, "unreadable": 0, "documents": []}
-    docs = _rows(conn, "SELECT DISTINCT d.id, d.content_sha FROM documents d JOIN document_urls du ON du.document_id = d.id "
+    docs = _rows(conn, "SELECT DISTINCT d.id, d.content_sha, d.file_type FROM documents d JOIN document_urls du ON du.document_id = d.id "
                        "JOIN pages p ON p.id = du.page_id WHERE (CASE WHEN %s::bigint[] IS NULL "
                        "THEN d.page_count = 0 OR d.needs_ocr ELSE d.id = ANY (%s::bigint[]) END) "
                        "AND (%s::bigint IS NULL OR p.brand_id = %s) ORDER BY d.id",
@@ -73,15 +75,15 @@ def reread(conn, brand_id=None, after_document=None, documents=None):
     read = unreadable = 0
     done = []  # the documents whose original was read again (parse issues: only these can be fixed)
     from crawler.clock import time_up
-    for document_id, sha in docs:
+    for document_id, sha, file_type in docs:
         if time_up():  # P24: 6 AM; what is not re-read stays open and is taken again tomorrow
             break
-        body = library.read(sha)
+        body = library.read(sha, file_type)
         if body is None:
             unreadable += 1
             continue
         try:
-            found = extract_pdf(body)
+            found = extract_pdf(body) if file_type == "pdf" else extract(body, file_type)
         except ExtractError as exc:
             from crawler import issues
             issues.record(conn, sha, "unreadable", {"error": str(exc), "reader said": exc.detail, "bytes": len(body)},
@@ -92,11 +94,12 @@ def reread(conn, brand_id=None, after_document=None, documents=None):
                                         (document_id,))]
         done.append(document_id)
         for page_id in page_ids:
-            index_page(conn, page_id, body, is_pdf=True, found=found)
+            index_page(conn, page_id, body, is_pdf=True, found=found)  # is_pdf: a document the AI tags (uploads.py)
         pages, text_pages = _rows(conn, "SELECT COUNT(*), COUNT(*) FILTER (WHERE has_text) FROM page_text WHERE page_id = %s",
                                   (page_ids[0],))[0]
         _rows(conn, "UPDATE documents SET page_count = %s, text_pages = %s, needs_ocr = %s, "
-                    "updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s", (pages, text_pages, text_pages < pages, document_id))
+                    "updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s",
+              (pages, text_pages, file_type == "pdf" and text_pages < pages, document_id))
         if pages:
             read += 1
         else:
