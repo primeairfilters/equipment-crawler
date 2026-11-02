@@ -213,6 +213,33 @@ def test_an_upload_the_reader_failed_on_is_queued_again_after_a_fix(runtime_conn
     assert q(runtime_conn, "SELECT state FROM control.uploads WHERE id = %s", (upload,))[0][0] == "queued"
 
 
+def test_an_earlier_upload_of_the_same_file_is_queued_again_too(runtime_conn, monkeypatch):
+    # prod uploads 20, 29, 30, 31, 33 (2026-11-02): the same five manuals were uploaded twice and the reader failed on
+    # both copies. The issue names the later upload only, so the earlier copy stayed "Not added" for good after a fix.
+    import os
+    from pathlib import Path
+    from crawler.issues import retry
+    from crawler.uploads import process_uploads
+    body = b"%PDF-1.4\nupload broken twice " + uuid.uuid4().hex.encode()
+    uploads = []
+    for _ in range(2):
+        key = f"inbox/{uuid.uuid4().hex}/twice.pdf"
+        path = Path(os.environ["DOCS_DIR"], key)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(body)
+        uploads.append(q(runtime_conn, "INSERT INTO control.uploads (s3_key, file_name) VALUES (%s, 'twice.pdf') "
+                                       "RETURNING id", (key,))[0][0])
+    other = q(runtime_conn, "INSERT INTO control.uploads (s3_key, file_name, state, reason) VALUES "
+                            "(%s, 'twice.pdf', 'rejected', 'not a PDF') RETURNING id",
+              (f"inbox/{uuid.uuid4().hex}/twice.pdf",))[0][0]  # same name, another file (no size): left alone
+    process_uploads(runtime_conn)
+    assert issue(runtime_conn, body, "unreadable")[2]["upload_id"] == uploads[1]
+    new_reader(monkeypatch)
+    retry(runtime_conn)
+    states = dict(q(runtime_conn, "SELECT id, state FROM control.uploads WHERE id = ANY (%s)", (uploads + [other],)))
+    assert states == {uploads[0]: "queued", uploads[1]: "queued", other: "rejected"}
+
+
 # ---------------------------------------------------------------- the fix list and the admin page
 
 def test_the_fix_list_is_markdown_grouped_by_kind_and_kept_for_the_admin_page(runtime_conn, short_reader):

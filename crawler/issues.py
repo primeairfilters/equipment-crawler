@@ -192,8 +192,10 @@ def retry(conn, after_document=None):
             _rows(conn, "UPDATE parse_issues SET state = 'retrying' WHERE id = %s", (issue_id,))
             continue
         if document_id is None and (detail or {}).get("upload_id"):
-            _rows(conn, "UPDATE control.uploads SET state = 'queued', reason = NULL WHERE id = %s AND state = 'rejected'",
-                  (detail["upload_id"],))
+            # with any earlier upload of the same file (same name and size): the issue names only the latest one
+            _rows(conn, "UPDATE control.uploads u SET state = 'queued', reason = NULL FROM control.uploads named "
+                        "WHERE named.id = %s AND u.state = 'rejected' AND (u.id = named.id OR (u.file_name = "
+                        "named.file_name AND u.size_bytes = named.size_bytes))", (detail["upload_id"],))
             _rows(conn, "UPDATE parse_issues SET state = 'retrying' WHERE id = %s", (issue_id,))
             continue
     if reread:
