@@ -42,6 +42,7 @@ def _rows(conn, sql, args=()):
 def process_uploads(conn, after_upload=None):
     """Take every queued upload. Returns {"added", "already_had", "rejected"} counts."""
     summary = {"added": 0, "already_had": 0, "rejected": 0}
+    _fill_sizes(conn)
     for upload_id, key, name, crawl_brand in _rows(
             conn, "SELECT u.id, u.s3_key, u.file_name, c.crawl_brand_id FROM control.uploads u "
                   "LEFT JOIN control.brands c ON c.id = u.brand_id WHERE u.state IN ('queued', 'processing') "
@@ -66,6 +67,19 @@ def process_uploads(conn, after_upload=None):
         if after_upload is not None:
             after_upload()
     return summary
+
+
+def _fill_sizes(conn):
+    """The Uploads tab shows each file's size (user, 2026-11-01). The admin page writes it with each new upload; one
+    from before that gets it from its inbox file while the file is still there. A size is only shown, so a store that
+    cannot be asked leaves it for the next run rather than stopping the uploads."""
+    for upload_id, key in _rows(conn, "SELECT id, s3_key FROM control.uploads WHERE size_bytes IS NULL ORDER BY id"):
+        try:
+            size = library.inbox_size(key)
+        except Exception:  # noqa: BLE001
+            return
+        if size is not None:
+            _rows(conn, "UPDATE control.uploads SET size_bytes = %s WHERE id = %s", (size, upload_id))
 
 
 def _take(conn, upload_id, key, name, crawl_brand):

@@ -364,3 +364,21 @@ def test_add_brands_with_the_trades_list_down_adds_nothing(runtime_conn, monkeyp
     code, out, err = cli(runtime_conn, "add-brands", str(listing))
     assert code == 1 and "Nothing added" in out and "trades list" in out
     assert control_row(runtime_conn, a) is None
+
+
+def test_a_manual_taken_out_for_its_trade_is_not_live_without_sections(runtime_conn):
+    # prod parse issues 57-61, 2026-11-02: Raypak pool heater manuals and a return form under Ruud (hvac, plumbing)
+    # left Breeze as they should, but check and the parse-issue scan both listed them as live with no live sections.
+    from crawler.issues import scan
+    from crawler.kb import build, check, follow_trades, publish
+    name, brand_id = new_brand(runtime_conn)
+    doc, _, _ = document(runtime_conn, name, trade="hvac")
+    found_by(runtime_conn, doc, brand_id)
+    build(runtime_conn, doc, pages=PAGES)
+    publish(runtime_conn, doc)
+    set_trades(runtime_conn, brand_id, ["generators"])
+    assert follow_trades(runtime_conn)["withdrawn"] == 1
+    assert doc not in check(runtime_conn)["live_without_sections"]
+    scan(runtime_conn)
+    assert q(runtime_conn, "SELECT COUNT(*) FROM parse_issues WHERE document_id = %s AND kind = 'no_sections'",
+             (doc,))[0][0] == 0

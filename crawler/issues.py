@@ -137,9 +137,8 @@ def scan(conn):
         _rows(conn, "INSERT INTO issue_checks (document_id, check_name, version) VALUES (%s, 'garbled_text', %s) "
                     "ON CONFLICT (document_id, check_name) DO UPDATE SET version = EXCLUDED.version, "
                     "checked_at = (now() AT TIME ZONE 'UTC')", (document_id, reader))
-    live_without = ("SELECT d.content_sha FROM documents d WHERE d.state = 'live' AND d.hidden_at IS NULL "
-                    "AND d.doc_type IS DISTINCT FROM 'not_equipment' AND NOT EXISTS "
-                    "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.is_live)")
+    from crawler.kb import LIVE_WITHOUT_SECTIONS
+    live_without = "SELECT d.content_sha FROM documents d WHERE " + LIVE_WITHOUT_SECTIONS
     for (sha,) in _rows(conn, live_without):
         document_id = _rows(conn, "SELECT id, page_count FROM documents WHERE content_sha = %s", (sha,))[0]
         record(conn, sha, "no_sections", {"pages": document_id[1]}, document_id[0])

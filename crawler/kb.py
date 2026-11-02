@@ -194,6 +194,12 @@ _OFF_TRADE = ("d.trade IS NOT NULL AND EXISTS (SELECT 1 FROM document_urls du JO
               "du.page_id JOIN brands b ON b.id = p.brand_id WHERE du.document_id = d.id AND (cardinality(b.trades) = 0 "
               "OR d.trade = ANY (b.trades)))")
 TRADES_BY = "trades"  # visibility_log.by_whom for what follow_trades does
+# A live manual Breeze cannot use (check, and the no_sections parse issue). One follow_trades took out is not: it left
+# Breeze on purpose and keeps its build (prod parse issues 57-61, 2026-11-02).
+LIVE_WITHOUT_SECTIONS = ("d.state = 'live' AND d.hidden_at IS NULL AND d.doc_type IS DISTINCT FROM 'not_equipment' "
+                         "AND NOT EXISTS (SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.is_live) "
+                         "AND (SELECT v.by_whom FROM visibility_log v WHERE v.target_type = 'document' AND v.target_id = "
+                         f"d.id ORDER BY v.id DESC LIMIT 1) IS DISTINCT FROM '{TRADES_BY}'")
 
 
 def follow_trades(conn):
@@ -476,9 +482,7 @@ def check(conn):
     """Read only. Problems (document ids) and counts of live documents and sections per manufacturer and trade."""
     return {
         "live_without_sections": [r[0] for r in _rows(
-            conn, "SELECT d.id FROM documents d WHERE d.state = 'live' AND d.hidden_at IS NULL "
-                  "AND d.doc_type IS DISTINCT FROM 'not_equipment' AND NOT EXISTS "
-                  "(SELECT 1 FROM sections s WHERE s.document_id = d.id AND s.is_live) ORDER BY d.id")],
+            conn, "SELECT d.id FROM documents d WHERE " + LIVE_WITHOUT_SECTIONS + " ORDER BY d.id")],
         "hidden_but_live": [r[0] for r in _rows(
             conn, "SELECT DISTINCT s.document_id FROM sections s JOIN documents d ON d.id = s.document_id "
                   "LEFT JOIN manufacturers m ON m.id = d.manufacturer_id WHERE s.is_live AND (d.hidden_at IS NOT NULL "

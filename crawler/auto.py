@@ -123,6 +123,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     vectors("embedding what last night built")
     from crawler.clock import time_up
     summary["waiting_for_tomorrow"] = []
+    names = {}
     # P24: the brand whose last turn is oldest goes first (one the window did not reach yesterday), then priority
     for brand_id, name, budget, discovered in _rows(
             conn, "SELECT b.id, b.name, b.monthly_budget_usd, b.discovered_at IS NOT NULL OR EXISTS (SELECT 1 FROM "
@@ -149,13 +150,19 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
                                                           None if over else link_checker, commit))
         if crawled:
             row.update({k: crawled.get(k, 0) for k in ("fetched", "not_modified", "failed", "refused")})
+        names[brand_id] = name
         if not over and ai_client is not None:
-            row["tagged"] = step(f"tagging {name}", lambda: _tag(conn, ai_client, brand_id, name, commit, sleep,
-                                                                  wait_seconds, poll_seconds)) or 0
-        # the brand's newly tagged manuals go live in its own turn, not after every brand (prod run 6, 2026-11-01)
+            row["tagged"] = step(f"tagging {name}", lambda: _tag(conn, ai_client, name, commit)) or 0
+        # answers that came back for any brand, this one's or an earlier one's, go live in this turn: no brand waits
+        # for its own answers before the next is crawled (prod run 6, 2026-11-01)
+        came_back = (step("collecting tagging answers", lambda: _collect_answers(conn, ai_client, commit)) or {}
+                     if ai_client is not None else {})
+        _count_tagged(summary, names, came_back)
         from crawler.kb import build_and_publish
-        mine = step(f"sections for {name}", lambda: build_and_publish(conn, brand_id=brand_id, after_document=commit))
-        summary["sections_built"] += (mine or {}).get("built", 0)
+        for built_for in [brand_id] + [b for b in came_back if b != brand_id]:
+            mine = step(f"sections for {names.get(built_for, name)}",
+                        lambda: build_and_publish(conn, brand_id=built_for, after_document=commit))
+            summary["sections_built"] += (mine or {}).get("built", 0)
         step(f"host trials for {name}", lambda: _trials(conn, brand_id, name, summary))
         row["coverage"] = step(f"coverage for {name}", lambda: _coverage(
             conn, fetcher if public_lists else None, None if over else ai_client, brand_id, name, first_document,
@@ -167,8 +174,16 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         for brand_id, name in _rows(conn, "SELECT DISTINCT b.id, b.name FROM control.uploads u JOIN pages p ON p.id = "
                                           "u.page_id JOIN brands b ON b.id = p.brand_id WHERE b.status <> 'active' AND "
                                           "(p.extraction_status = 'waiting' OR p.ai_batch_id IS NOT NULL) ORDER BY b.id"):
-            step(f"tagging uploads of {name}", lambda: _tag(conn, ai_client, brand_id, name, commit, sleep, wait_seconds,
-                                                            poll_seconds))
+            step(f"tagging uploads of {name}", lambda: _tag(conn, ai_client, name, commit))
+        # the one wait of the night: for answers still out, until they are all in, the wait is over or it is 6 AM
+        came_back = step("waiting for tagging answers", lambda: _wait_for_answers(
+            conn, ai_client, commit, sleep, wait_seconds, poll_seconds)) or {}
+        _count_tagged(summary, names, came_back)
+        for brand_id in came_back:
+            row = summary["brands"].get(names.get(brand_id))
+            if row is not None:
+                row["waiting_for_ai"] = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS "
+                                                    "NOT NULL", (brand_id,))[0][0]
 
     from crawler.kb import build_and_publish, check
     # whatever no turn built (uploads, a re-read after a reader change); each stops at the stop time by itself
@@ -311,20 +326,47 @@ def _crawl(conn, fetcher, name, max_pages, link_checker, commit):
     return run(conn, fetcher, brand=name, max_pages=max_pages, after_page=commit, link_checker=link_checker)
 
 
-def _tag(conn, client, brand_id, name, commit, sleep, wait_seconds, poll_seconds):
-    """Submit this brand's documents for tagging, then poll until the answers are in or the wait is over."""
+def _tag(conn, client, name, commit):
+    """Send this brand's documents for tagging (and take in its answers already back). No wait: the next brand is
+    crawled while the answers are out."""
     from crawler.extract import extract_pass
-    tagged, waited = 0, 0
-    while True:
-        done = extract_pass(conn, client, brand=name, after_document=commit)
-        tagged += done.get("collected", 0)
-        commit()
-        out = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS NOT NULL", (brand_id,))[0][0]
-        from crawler.clock import time_up
-        if not out or waited >= wait_seconds or time_up():  # at 6 AM the answers wait for the next run, paid for
-            return tagged
+    done = extract_pass(conn, client, brand=name, after_document=commit)
+    commit()
+    return done.get("collected", 0)
+
+
+def _out(conn):
+    return dict(_rows(conn, "SELECT brand_id, COUNT(*) FROM pages WHERE ai_batch_id IS NOT NULL GROUP BY brand_id"))
+
+
+def _collect_answers(conn, client, commit):
+    """Take in the tagging answers back for any brand. Returns {brand_id: answers taken in}."""
+    from crawler.extract import collect_pass
+    before = _out(conn)
+    collect_pass(conn, client, after_document=commit)
+    commit()
+    after = _out(conn)
+    return {b: n - after.get(b, 0) for b, n in before.items() if after.get(b, 0) < n}
+
+
+def _wait_for_answers(conn, client, commit, sleep, wait_seconds, poll_seconds):
+    """Poll for the answers still out, for every brand at once, until they are in or the wait is over. At 6 AM the
+    answers wait for the next run, paid for. Returns {brand_id: answers taken in}."""
+    from crawler.clock import time_up
+    came_back, waited = {}, 0
+    while _out(conn) and waited < wait_seconds and not time_up():
         sleep(poll_seconds)
         waited += poll_seconds
+        for brand_id, n in _collect_answers(conn, client, commit).items():
+            came_back[brand_id] = came_back.get(brand_id, 0) + n
+    return came_back
+
+
+def _count_tagged(summary, names, came_back):
+    for brand_id, n in came_back.items():
+        row = summary["brands"].get(names.get(brand_id))
+        if row is not None:
+            row["tagged"] = (row.get("tagged") or 0) + n
 
 
 def _prune(owner_connect):

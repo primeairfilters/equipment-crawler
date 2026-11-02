@@ -323,6 +323,20 @@ def extract_pass(conn, client, *, brand=None, model=ai.HAIKU, cap_usd=None, now=
         unlock(conn, "crawler-extract")
 
 
+def collect_pass(conn, client, *, now=None, after_document=None):
+    """Take in every tagging answer that has come back, for any brand, without sending anything new. The nightly run
+    calls it at each brand's turn and while it waits at the end. Returns how many."""
+    now = now or _utcnow()
+    if not try_lock(conn, "crawler-extract"):
+        raise RuntimeError("Another extract is already running.")
+    try:
+        done = _collect(conn, client, None, now, after_document)
+        copy_twin_tags(conn)
+        return done
+    finally:
+        unlock(conn, "crawler-extract")
+
+
 def copy_twin_tags(conn, brand_id=None):
     """A document whose text was already read under another file (its pages are "already read") never gets its own
     answer: it takes the tags, title and models of the tagged document with the same text (user, 2026-10-28). Same

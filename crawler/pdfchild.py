@@ -338,18 +338,94 @@ def _stable_ids():
     return next_page
 
 
+MAX_DRAWN_PIECES = 100_000  # line pieces on a page; pdfplumber reads about 20,000 a second and holds them all
+
+
+def _drawn_pieces(objects, depth=0):
+    """The line pieces drawn on a page (objects: (count, get)), counted by pdfium in C, stopping once over the limit.
+    Wiring diagrams in AAON, Addison and Mitsubishi manuals hold 100,000 to 1,170,000 (prod parse issues 53-66,
+    2026-11-02); pdfplumber took up to 51 s and 1.6 GB on one such page."""
+    import pypdfium2.raw as pdfium
+    count, get = objects
+    pieces = 0
+    for n in range(count):
+        obj = get(n)
+        kind = pdfium.FPDFPageObj_GetType(obj)
+        if kind == pdfium.FPDF_PAGEOBJ_PATH:
+            pieces += max(pdfium.FPDFPath_CountSegments(obj), 0)
+        elif kind == pdfium.FPDF_PAGEOBJ_FORM and depth < 5:
+            pieces += _drawn_pieces((pdfium.FPDFFormObj_CountObjects(obj),
+                                     lambda k, obj=obj: pdfium.FPDFFormObj_GetObject(obj, k)), depth + 1)
+        if pieces > MAX_DRAWN_PIECES:
+            break
+    return pieces
+
+
+def crowded(page):
+    """True when a pdfium page has more line pieces than pdfplumber can read in time."""
+    import pypdfium2.raw as pdfium
+    objects = (pdfium.FPDFPage_CountObjects(page.raw), lambda k: pdfium.FPDFPage_GetObject(page.raw, k))
+    return _drawn_pieces(objects) > MAX_DRAWN_PIECES
+
+
+def plain_lines(page):
+    """A crowded page's text lines read by pdfium: no tables and no clip check, but each line's size (median character
+    size) and boldness (most characters 700 or heavier), as page_layout gives them. The size is the font's times the
+    text's scale: Mitsubishi's manuals set a 1-point font scaled up to 12."""
+    import math
+    import pypdfium2.raw as pdfium
+    text = page.get_textpage()
+    lines, chars, scale = [], [], pdfium.FS_MATRIX()
+    for n in range(text.count_chars()):
+        code = pdfium.FPDFText_GetUnicode(text.raw, n)
+        if code in (10, 13):
+            if chars:
+                lines.append(chars)
+            chars = []
+        elif code:
+            pdfium.FPDFText_GetMatrix(text.raw, n, scale)
+            chars.append((chr(code), pdfium.FPDFText_GetFontSize(text.raw, n) * math.hypot(scale.c, scale.d),
+                          pdfium.FPDFText_GetFontWeight(text.raw, n) >= 700))
+    if chars:
+        lines.append(chars)
+    out, used = [], 0
+    for line in lines:
+        words = "".join(c for c, _, _ in line).strip()
+        if not words:
+            continue
+        if used > MAX_PAGE_CHARS:
+            break
+        used += len(words)
+        out.append({"kind": "text", "text": words, "size": round(statistics.median(s for c, s, _ in line if not c.isspace()), 1),
+                    "bold": sum(b for _, _, b in line) * 2 > len(line)})
+    text.close()
+    return out
+
+
 def main():
     max_pages = int(sys.argv[1])
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
     import pdfplumber
+    import pypdfium2
     _clip_aware()
     next_page = _stable_ids()
 
     data = sys.stdin.buffer.read()
     pages, layouts, rows = [], [], []
+    fast = pypdfium2.PdfDocument(data)
     with pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {})) as pdf:
         total = len(pdf.pages)  # more than max_pages: the document was cut (a parse issue)
-        for page in pdf.pages[:max_pages]:
+        for number, page in enumerate(pdf.pages[:max_pages]):
+            quick = fast[number]
+            if crowded(quick):
+                items = plain_lines(quick)
+                pages.append("\n".join(i["text"] for i in items)[:MAX_PAGE_CHARS])
+                rows.append((0, len(items)))
+                if layout:
+                    layouts.append(items)
+                quick.close()
+                continue
+            quick.close()
             pages.append(page_text(page)[:MAX_PAGE_CHARS])
             try:
                 rows.append(drawn_rows(page))
@@ -359,6 +435,7 @@ def main():
                 layouts.append(page_layout(page))
             page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
             next_page()
+    fast.close()
     out = {"pages": pages, "rows": rows, "page_total": total}
     if layout:
         out["layout"] = layouts

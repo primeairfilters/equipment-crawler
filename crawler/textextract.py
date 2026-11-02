@@ -114,10 +114,7 @@ def _children(node):
 def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
     """Per page, the text lines with font size and boldness, and the ruled tables, in reading order (for sections).
     The reader's answer is kept in the library (_kept_layout), so a sectioner change does not read every PDF again."""
-    raw = _kept_layout(data, max_pages)
-    if raw is None:
-        raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
-        _keep_layout(data, max_pages, raw)
+    raw = _read(data, max_pages, timeout, memory)
     try:
         layout = raw["layout"]
     except KeyError as exc:
@@ -215,10 +212,20 @@ def _write_whole(path, value):
             part.unlink(missing_ok=True)
 
 
+def _read(data, max_pages, timeout, memory):
+    """The reader's answer for this PDF: the kept one, else one layout read, kept. One read serves the crawl's text
+    (extract_pdf) and the section build's layout (extract_layout) (user, 2026-11-02: a new PDF was read twice)."""
+    raw = _kept_layout(data, max_pages)
+    if raw is None:
+        raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
+        _keep_layout(data, max_pages, raw)
+    return raw
+
+
 def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
     """Parsed in a child process with a time and memory limit; over-long documents are cut. Pages with no text layer
     (empty, or text drawn as shapes) are read with OCR when Tesseract is there (ocr_pages)."""
-    raw = _run_child(data, [str(max_pages)], timeout, memory)
+    raw = _read(data, max_pages, timeout, memory)
     blank = drawn_pages(raw.get("rows"))
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
     left_out = set()

@@ -69,6 +69,11 @@ def run_child(monkeypatch, page_text, closed=None):
     fake = types.ModuleType("pdfplumber")
     fake.open = lambda handle: Pdf()
     monkeypatch.setitem(sys.modules, "pdfplumber", fake)
+    quick = types.SimpleNamespace(close=lambda: None)  # pdfium's copy of a page, only asked whether it is crowded
+    fast = types.ModuleType("pypdfium2")
+    fast.PdfDocument = lambda data: type("Doc", (), {"__getitem__": lambda self, n: quick, "close": lambda self: None})()
+    monkeypatch.setitem(sys.modules, "pypdfium2", fast)
+    monkeypatch.setattr(pdfchild, "crowded", lambda page: False)
     monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)  # the stand-in has no pdfminer underneath to hook
     monkeypatch.setattr(sys, "argv", ["pdfchild", "5"])
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4 stand-in")))
@@ -96,6 +101,7 @@ def test_a_short_pages_text_is_left_alone(monkeypatch):
 
 def test_child_output_over_the_parents_limit_is_an_error(monkeypatch):
     from crawler import textextract
+    monkeypatch.delenv("DOCS_DIR", raising=False)  # no kept read: the second call must read the PDF again
     pdf = make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2", "Tonnage 2.0"]])
     assert textextract.extract_pdf(pdf).pages  # control: with the normal limit it works
     monkeypatch.setattr(textextract, "PDF_MAX_OUTPUT_BYTES", 50)
@@ -125,3 +131,28 @@ def test_letters_of_one_word_are_never_split():
     from crawler.textextract import extract_pdf
     text = extract_pdf(make_pdf([["Installation instructions for the condensing boiler"] * 5])).pages[0]
     assert "Installation instructions for the condensing boiler" in text
+
+
+def _wiring_pdf(pieces):
+    """Page 1 a wiring diagram: labels over one drawing of `pieces` short lines (prod parse issues 53-66, 2026-11-02:
+    AAON, Addison and Mitsubishi manuals with pages of 100,000 to 1,170,000 line pieces, which pdfplumber took up to
+    51 s and 1.6 GB a page to read). Page 2 an ordinary page."""
+    drawing = ["0.1 w"] + [f"{n % 500} {n // 500 % 700} m {n % 500 + 1} {n // 500 % 700} l" for n in range(pieces)] + ["S"]
+    return make_pdf([["WIRING DIAGRAM", "Terminal R to thermostat R"], ["Refrigerant charging", "Charge by subcooling"]],
+                    drawings=[drawing, []])
+
+
+def test_a_page_crowded_with_drawing_is_read_quickly_with_its_text():
+    from crawler.textextract import extract_pdf
+    out = extract_pdf(_wiring_pdf(300_000), timeout=15)
+    assert "Terminal R to thermostat R" in out.pages[0]
+    assert "Charge by subcooling" in out.pages[1]
+
+
+def test_a_page_crowded_with_drawing_keeps_its_lines_for_the_sections():
+    from crawler.textextract import extract_layout
+    pages = extract_layout(_wiring_pdf(300_000), timeout=15)
+    first = [i for i in pages[0] if i["kind"] == "text"]
+    assert [i["text"] for i in first] == ["WIRING DIAGRAM", "Terminal R to thermostat R"]
+    assert all(i["size"] == 12.0 for i in first)
+    assert [i["text"] for i in pages[1]] == ["Refrigerant charging", "Charge by subcooling"]

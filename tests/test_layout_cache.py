@@ -90,3 +90,16 @@ def test_a_pdf_cut_at_a_lower_page_limit_is_read_again_under_a_higher_one(tmp_pa
     three = make_pdf([["Page one of the manual"], ["Page two of the manual"], ["Page three of the manual"]])
     assert len(crawler.textextract.extract_layout(three, max_pages=2)) == 2
     assert len(crawler.textextract.extract_layout(three, max_pages=9)) == 3
+
+
+def test_a_new_pdf_is_read_once_for_its_text_and_its_sections(tmp_path, monkeypatch):
+    # user 2026-11-02: the crawl read a new PDF for its text and the section build read it again for its layout. One
+    # read now serves both: the crawl's read is the layout read, and it is kept.
+    import crawler.textextract
+    monkeypatch.setenv("DOCS_DIR", str(tmp_path))
+    text = crawler.textextract.extract_pdf(PDF)
+    assert "Read all instructions before installing the unit." in text.pages[0]
+    monkeypatch.setattr(crawler.textextract, "_run_child", no_reader)
+    assert [i["text"] for i in crawler.textextract.extract_layout(PDF)[0]] == \
+        ["Installation Manual", "Read all instructions before installing the unit."]
+    assert crawler.textextract.extract_pdf(PDF).pages == text.pages  # a re-read of the text needs no read either

@@ -197,3 +197,17 @@ def test_an_upload_for_a_paused_brand_is_still_tagged(world):
     auto(world)
     document_id = outcome(world.conn, upload)[2]
     assert q(world.conn, "SELECT state FROM documents WHERE id = %s", (document_id,))[0][0] == "live"
+
+
+def test_an_older_upload_gets_its_size_from_its_inbox_file(world):
+    # The Uploads tab shows each file's size (user, 2026-11-01). The admin page writes it with new uploads; older ones
+    # get it from their inbox file, a file gone from the inbox stays without one, and a size already set stays.
+    there = queue(world.conn, b"x" * 1234, name="old.pdf")
+    gone = queue(world.conn, b"", name="gone.pdf", in_inbox=False)
+    sized = queue(world.conn, b"y" * 10, name="sized.pdf")
+    q(world.conn, "UPDATE control.uploads SET state = 'rejected', size_bytes = CASE WHEN id = %s THEN 99 END "
+                  "WHERE id IN (%s, %s, %s)", (sized, there, gone, sized))
+    process(world.conn)
+    sizes = dict(q(world.conn, "SELECT id, size_bytes FROM control.uploads WHERE id IN (%s, %s, %s)",
+                   (there, gone, sized)))
+    assert sizes == {there: 1234, gone: None, sized: 99}

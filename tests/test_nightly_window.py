@@ -440,3 +440,47 @@ def test_a_recheck_that_fails_keeps_the_stop_it_had():
     assert not clock.time_up()
     t[0] = datetime(2030, 7, 1, 13, 0)
     assert clock.time_up()
+
+
+def test_the_next_brand_is_crawled_while_the_first_brands_tagging_answers_are_out(world, monkeypatch):
+    # prod run 6, 2026-11-01: each brand sat up to 2 hours waiting for its tagging answers before the next brand
+    # started, so a 5-hour window reached a few brands. Now every brand is crawled first and the run waits once, at the
+    # end, for whatever is still out.
+    import crawler.auto
+    a_brand_with_a_manual(world)
+    other, _ = a_second_brand(world)
+
+    class Slow(FakeAI):
+        def batch_results(self, batch_id):
+            return None
+
+    events = []
+    crawl = crawler.auto._crawl
+    monkeypatch.setattr(crawler.auto, "_crawl", lambda conn, fetcher, name, *a: events.append(name) or crawl(
+        conn, fetcher, name, *a))
+    summary = run(world, ai_client=Slow(lambda r: tags()), sleep=lambda s: events.append("sleep"), wait_seconds=900,
+                  poll_seconds=300)
+    assert events == [world.brand, other, "sleep", "sleep", "sleep"]
+    assert summary["brands"][world.brand]["waiting_for_ai"] == 1 and summary["state"] == "done"
+
+
+def test_answers_that_come_back_later_are_tagged_and_built_in_the_same_run(world):
+    a_brand_with_a_manual(world)
+    a_second_brand(world)
+
+    class Later(FakeAI):  # nothing is ready until the run has slept once
+        ready = False
+
+        def batch_results(self, batch_id):
+            return super().batch_results(batch_id) if self.ready else None
+
+    ai = Later(lambda r: tags())
+
+    def sleep(seconds):
+        ai.ready = True
+
+    summary = run(world, ai_client=ai, sleep=sleep, wait_seconds=900, poll_seconds=300)
+    assert summary["brands"][world.brand]["tagged"] == 1 and summary["brands"][world.brand]["waiting_for_ai"] == 0
+    assert q(world.conn, "SELECT COUNT(*) FROM sections s JOIN document_urls du ON du.document_id = s.document_id "
+                         "JOIN pages p ON p.id = du.page_id JOIN brands b ON b.id = p.brand_id "
+                         "WHERE b.name = %s AND s.is_live", (world.brand,))[0][0] > 0

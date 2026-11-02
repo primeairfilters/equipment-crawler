@@ -91,6 +91,23 @@ def read_inbox(key):
     return _get(key)
 
 
+def inbox_size(key):
+    """The size in bytes of a file in inbox/, or None when it is not there. Asks for the size only, not the file."""
+    if not INBOX.fullmatch(key) or any(part in (".", "..") for part in key.split("/")):
+        raise ValueError(f"{key} is not a file in inbox/")
+    if _bucket():
+        from botocore.exceptions import ClientError
+        try:
+            return _client().head_object(Bucket=_bucket(), Key=key)["ContentLength"]
+        except ClientError as exc:
+            if _missing(exc):
+                return None
+            raise
+    folder = _folder()
+    path = os.path.join(folder, *key.split("/")) if folder else None
+    return os.path.getsize(path) if path and os.path.isfile(path) else None
+
+
 def _get(key):
     if _bucket():
         from botocore.exceptions import ClientError

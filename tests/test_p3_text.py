@@ -73,8 +73,9 @@ def test_something_that_is_not_a_pdf_is_an_extract_error():
         extract_pdf(b"%PDF-1.4\nthis is not really a pdf")
 
 
-def test_a_pdf_that_takes_too_long_is_stopped():
+def test_a_pdf_that_takes_too_long_is_stopped(monkeypatch):
     from crawler.textextract import ExtractError, extract_pdf
+    monkeypatch.delenv("DOCS_DIR", raising=False)  # no kept read: the second call must read the PDF again
     pdf = make_pdf([[f"Model {MODEL}"]])
     assert extract_pdf(pdf).pages  # control: with the normal time limit it works
     with pytest.raises(ExtractError):
