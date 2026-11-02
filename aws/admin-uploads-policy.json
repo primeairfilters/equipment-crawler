@@ -6,6 +6,12 @@
       "Effect": "Allow",
       "Action": "s3:PutObject",
       "Resource": "arn:aws:s3:::BUCKET_NAME/inbox/*"
+    },
+    {
+      "Sid": "AdminPageDownloadsUploadsFromTheInboxOnly",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::BUCKET_NAME/inbox/*"
     }
   ]
 }
