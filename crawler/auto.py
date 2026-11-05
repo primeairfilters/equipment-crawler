@@ -124,6 +124,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     from crawler.clock import time_up
     summary["waiting_for_tomorrow"] = []
     names = {}
+    answered = set()  # brands whose tagging answers came back this run: their coverage is counted again at the end
     # P24: the brand whose last turn is oldest goes first (one the window did not reach yesterday), then priority
     for brand_id, name, budget, discovered in _rows(
             conn, "SELECT b.id, b.name, b.monthly_budget_usd, b.discovered_at IS NOT NULL OR EXISTS (SELECT 1 FROM "
@@ -158,6 +159,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         came_back = (step("collecting tagging answers", lambda: _collect_answers(conn, ai_client, commit)) or {}
                      if ai_client is not None else {})
         _count_tagged(summary, names, came_back)
+        answered.update(came_back)
         from crawler.kb import build_and_publish
         for built_for in [brand_id] + [b for b in came_back if b != brand_id]:
             mine = step(f"sections for {names.get(built_for, name)}",
@@ -179,11 +181,15 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         came_back = step("waiting for tagging answers", lambda: _wait_for_answers(
             conn, ai_client, commit, sleep, wait_seconds, poll_seconds)) or {}
         _count_tagged(summary, names, came_back)
+        answered.update(came_back)
         for brand_id in came_back:
             row = summary["brands"].get(names.get(brand_id))
             if row is not None:
                 row["waiting_for_ai"] = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS "
                                                     "NOT NULL", (brand_id,))[0][0]
+        from crawler.coverage import recount
+        for brand_id in sorted(answered):
+            step(f"coverage again for {names.get(brand_id, brand_id)}", lambda: recount(conn, brand_id))
 
     from crawler.kb import build_and_publish, check
     # whatever no turn built (uploads, a re-read after a reader change); each stops at the stop time by itself

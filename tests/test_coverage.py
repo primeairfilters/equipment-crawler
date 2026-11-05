@@ -203,6 +203,30 @@ def test_the_nightly_run_measures_coverage_and_fills_gaps(energystar):
     assert shown == ((3, 0, 0, "filling_gaps"),)
 
 
+def test_tagging_answers_that_come_back_after_the_brands_turn_count_in_its_coverage(energystar):
+    """Prod run 14 (2026-11-05): Gree was measured while its 1063 manuals were still with the AI, so the admin page
+    read 0% for a brand with 930 live manuals. Answers taken in later in the run update its coverage."""
+    from crawler.auto import run_auto
+    from p11support import Checker, serve, serve_pdf
+    from test_p14_search import BagEmbedder
+    world = energystar
+    q(world.conn, "UPDATE brands SET discovered_at = now() WHERE id = %s", (world.brand_id,))
+    serve(world, "/start", "/manual.pdf")
+    serve_pdf(world, "/manual.pdf")
+    start(world)
+    waited = []
+
+    class Late(FakeAI):
+        def batch_results(self, batch_id):
+            return super().batch_results(batch_id) if waited else None  # still processing until the end-of-run wait
+
+    summary = run_auto(world.conn, fetcher=world.fetcher(), ai_client=Late(lambda r: tags(models=("RA15AZ24AJ3CA",))),
+                       embedder=BagEmbedder(), link_checker=Checker(), sleep=waited.append)
+    assert waited and summary["brands"][world.brand]["tagged"] == 1  # the answer came back in the end-of-run wait
+    shown = q(world.conn, "SELECT families, covered FROM control.brand_coverage WHERE brand = %s", (world.brand,))
+    assert shown == ((3, 1),)
+
+
 def test_gap_fill_stops_at_its_share_for_the_run(energystar):
     from crawler.gapfill import gap_fill
     world = energystar

@@ -176,14 +176,28 @@ def uncovered(conn, brand_id):
     return [fam for fam, _, covered in families(conn, brand_id) if not covered]
 
 
-def measure(conn, brand_id, *, run_id=None, new_documents=0, gap_searches=0, site_searches=0):
-    """Write and return the brand's coverage row for this run."""
-    listed = families(conn, brand_id)
+def _by_category(listed):
     by_category = {}
     for _, category, covered in listed:
         entry = by_category.setdefault(category or "other", {"families": 0, "covered": 0})
         entry["families"] += 1
         entry["covered"] += int(bool(covered))
+    return by_category
+
+
+def recount(conn, brand_id):
+    """Count the brand's covered families again on its latest coverage row, for tagging answers that came back after
+    it was measured (prod run 14, 2026-11-05: Gree read 0% with 930 live manuals). Phase and the round's counts stay."""
+    listed = families(conn, brand_id)
+    _rows(conn, "UPDATE coverage SET families = %s, covered = %s, by_category = %s WHERE id = (SELECT id FROM coverage "
+                "WHERE brand_id = %s ORDER BY measured_at DESC, id DESC LIMIT 1)",
+          (len(listed), sum(1 for _, _, c in listed if c), json.dumps(_by_category(listed)), brand_id))
+
+
+def measure(conn, brand_id, *, run_id=None, new_documents=0, gap_searches=0, site_searches=0):
+    """Write and return the brand's coverage row for this run."""
+    listed = families(conn, brand_id)
+    by_category = _by_category(listed)
     queued = _rows(conn, "SELECT EXISTS (SELECT 1 FROM pages WHERE brand_id = %s AND fetch_state = 'queued') OR EXISTS "
                          "(SELECT 1 FROM start_urls s WHERE s.brand_id = %s AND s.status = 'active' AND NOT EXISTS "
                          "(SELECT 1 FROM pages p WHERE p.brand_id = s.brand_id AND p.url_sha = s.url_sha))",
