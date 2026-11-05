@@ -131,6 +131,29 @@ def test_a_manual_outside_its_brands_trades_is_kept_but_never_goes_live(runtime_
     assert live(runtime_conn, doc) == () and q(runtime_conn, "SELECT state FROM documents WHERE id = %s", (doc,)) == (("built",),)
 
 
+def test_an_uploaded_manual_goes_live_whatever_its_brands_trades(runtime_conn):
+    """User 2026-11-05: a manual someone uploaded on purpose is never held back for its trade, even when the brand
+    picked (or named in it) has other trades. The same manual found only by a crawl is still held (control)."""
+    import hashlib
+    from crawler.kb import blocked, build, publish
+    from crawler.uploads import UPLOADS_HOST
+    name, brand_id = new_brand(runtime_conn)
+    set_trades(runtime_conn, brand_id, ["generators"])
+    doc, _, _ = document(runtime_conn, name, trade="hvac")
+    found_by(runtime_conn, doc, brand_id)
+    assert blocked(runtime_conn, doc) == "its trade is not one of its brand's trades"  # control: crawled only
+    host_id = q(runtime_conn, "INSERT INTO hosts (host) VALUES (%s) ON CONFLICT (host) DO UPDATE SET host = "
+                              "EXCLUDED.host RETURNING id", (UPLOADS_HOST,))[0][0]
+    url = f"upload://{uuid.uuid4().hex}/manual.pdf"
+    page_id = q(runtime_conn, "INSERT INTO pages (brand_id, host_id, url, url_sha, is_pdf, fetch_state) VALUES "
+                              "(%s, %s, %s, %s, true, 'fetched') RETURNING id",
+                (brand_id, host_id, url, hashlib.sha256(url.encode()).hexdigest()))[0][0]
+    q(runtime_conn, "INSERT INTO document_urls (document_id, page_id, url) VALUES (%s, %s, %s)", (doc, page_id, url))
+    assert blocked(runtime_conn, doc) is None
+    build(runtime_conn, doc, pages=PAGES)
+    assert publish(runtime_conn, doc)[0] is True and live(runtime_conn, doc) != ()
+
+
 def test_a_manual_in_one_of_its_brands_trades_goes_live(runtime_conn):
     from crawler.kb import blocked
     name, brand_id = new_brand(runtime_conn)

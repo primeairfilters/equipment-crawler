@@ -23,6 +23,7 @@ from crawler.filereaders import layout as file_layout
 from crawler.sheets import SHEET_TYPES, sheet_sections
 from crawler.store import alias_key
 from crawler.textextract import LAYOUT_TIMEOUT_SECONDS, ExtractError, extract_layout
+from crawler.uploads import UPLOADS_HOST
 
 LAYOUT_SECONDS_PER_PAGE = 5
 
@@ -187,12 +188,13 @@ def blocked(conn, document_id, lock=False):
 
 
 # P23 (D88): a manual whose tagged trade is none of its brands' trades stays out of Breeze. The brands are the ones
-# whose crawl found it; a brand with no trades (one added before P23, the uploads brand) takes any trade.
+# whose crawl found it; a brand with no trades (one added before P23, the uploads brand) takes any trade. A manual
+# someone uploaded takes any trade too (user 2026-11-05): it was picked on purpose.
 OFF_TRADE_REASON = "its trade is not one of its brand's trades"
 _OFF_TRADE = ("d.trade IS NOT NULL AND EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = du.page_id "
               "WHERE du.document_id = d.id) AND NOT EXISTS (SELECT 1 FROM document_urls du JOIN pages p ON p.id = "
-              "du.page_id JOIN brands b ON b.id = p.brand_id WHERE du.document_id = d.id AND (cardinality(b.trades) = 0 "
-              "OR d.trade = ANY (b.trades)))")
+              "du.page_id JOIN brands b ON b.id = p.brand_id JOIN hosts h ON h.id = p.host_id WHERE du.document_id = "
+              f"d.id AND (cardinality(b.trades) = 0 OR d.trade = ANY (b.trades) OR h.host = '{UPLOADS_HOST}'))")
 TRADES_BY = "trades"  # visibility_log.by_whom for what follow_trades does
 # A live manual Breeze cannot use (check, and the no_sections parse issue). One follow_trades took out is not: it left
 # Breeze on purpose and keeps its build (prod parse issues 57-61, 2026-11-02).
