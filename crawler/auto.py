@@ -25,6 +25,7 @@ stopped brand (`./crawl stop`, the admin page's pause) is skipped. One step fail
 """
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -33,6 +34,7 @@ LOCK_KEY = 7_316_002_017  # pg advisory lock: one `auto` run at a time
 AUTO_MAX_PAGES = 200  # per start address, per night
 WAIT_SECONDS = 2 * 3600  # how long a run waits for the AI's tagging answers
 POLL_SECONDS = 300
+CRAWL_WORKERS = 5  # brands crawled at once (user 2026-11-06); each site still gets one request at a time (fetch.py)
 
 
 def _rows(conn, sql, args=()):
@@ -55,7 +57,8 @@ def run_going(conn):
 
 def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None, owner_connect=None, commit=None,
              sleep=time.sleep, now=None, max_pages=AUTO_MAX_PAGES, wait_seconds=WAIT_SECONDS,
-             poll_seconds=POLL_SECONDS, public_lists=True, stop_at=None, clock=None, recheck=None):
+             poll_seconds=POLL_SECONDS, public_lists=True, stop_at=None, clock=None, recheck=None, workers=1, connect=None,
+             make_fetcher=None):
     """Returns the run's summary: state ('done' or 'skipped'), run_id, brands {name: {...}}, documents_added,
     documents_retired, embedded, ai_spent, needs_you [lines], interrupted_runs."""
     commit = commit or (lambda: None)
@@ -70,7 +73,7 @@ def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None,
         window.set_stop(stop_at, clock, recheck)
     try:
         return _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit, sleep,
-                    now or _utcnow(), max_pages, wait_seconds, poll_seconds, public_lists)
+                    now or _utcnow(), max_pages, wait_seconds, poll_seconds, public_lists, workers, connect, make_fetcher)
     finally:
         if timed:
             window.clear()
@@ -78,7 +81,7 @@ def run_auto(conn, *, fetcher, link_checker=None, ai_client=None, embedder=None,
 
 
 def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit, sleep, now, max_pages, wait_seconds,
-         poll_seconds, public_lists):
+         poll_seconds, public_lists, workers=1, connect=None, make_fetcher=None):
     interrupted = len(_rows(conn, "UPDATE runs SET state = 'interrupted', finished_at = now() AT TIME ZONE 'UTC' "
                                   "WHERE state = 'running' RETURNING id"))
     run_id = _rows(conn, "INSERT INTO runs (state) VALUES ('running') RETURNING id")[0][0]
@@ -91,15 +94,19 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
                "interrupted_runs": interrupted,
                "embedded": 0, "pruned": None, "hosts": []}
 
-    def step(name, work):
-        try:
-            return work()
-        except Exception as exc:  # one step failing is reported; the rest of the run goes on
-            conn.rollback()
-            summary["needs_you"].append(f"{name} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
-            return None
-        finally:
-            commit()
+    def stepper(conn, commit):
+        def step(name, work):
+            try:
+                return work()
+            except Exception as exc:  # one step failing is reported; the rest of the run goes on
+                conn.rollback()
+                summary["needs_you"].append(f"{name} failed: {exc.__class__.__name__}: {str(exc)[:200]}")
+                return None
+            finally:
+                commit()
+        return step
+
+    step = stepper(conn, commit)
 
     month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     step("reading the admin page's brands", lambda: _sync(conn))
@@ -126,14 +133,23 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     names = {}
     answered = set()  # brands whose tagging answers came back this run: their coverage is counted again at the end
     # P24: the brand whose last turn is oldest goes first (one the window did not reach yesterday), then priority
-    for brand_id, name, budget, discovered in _rows(
-            conn, "SELECT b.id, b.name, b.monthly_budget_usd, b.discovered_at IS NOT NULL OR EXISTS (SELECT 1 FROM "
-                  "start_urls s WHERE s.brand_id = b.id) FROM brands b "
-                  "LEFT JOIN control.brands c ON c.crawl_brand_id = b.id WHERE b.status = 'active' "
-                  "ORDER BY COALESCE(b.last_turn_run, 0), COALESCE(c.priority, 0) DESC, b.id"):
-        if summary["waiting_for_tomorrow"] or time_up():
-            summary["waiting_for_tomorrow"].append(name)  # still due: its turn comes first tomorrow
-            continue
+    queue = list(_rows(conn, "SELECT b.id, b.name, b.monthly_budget_usd, b.discovered_at IS NOT NULL OR EXISTS (SELECT 1 FROM "
+                        "start_urls s WHERE s.brand_id = b.id) FROM brands b "
+                        "LEFT JOIN control.brands c ON c.crawl_brand_id = b.id WHERE b.status = 'active' "
+                        "ORDER BY COALESCE(b.last_turn_run, 0), COALESCE(c.priority, 0) DESC, b.id"))
+    together = threading.Lock()  # the queue and the counts every worker adds to
+    one_ai = threading.Lock()  # tagging sent and answers taken in by one worker at a time: none taken in twice
+    one_build = threading.Lock()  # sections for one brand at a time: brands share manuals
+
+    def take():
+        with together:
+            if queue and (summary["waiting_for_tomorrow"] or time_up()):
+                summary["waiting_for_tomorrow"] += [b[1] for b in queue]  # still due: first tomorrow
+                queue.clear()
+            return queue.pop(0) if queue else None
+
+    def turn(conn, fetcher, commit, brand_id, name, budget, discovered):
+        step = stepper(conn, commit)
         _rows(conn, "UPDATE brands SET last_turn_run = %s WHERE id = %s", (run_id, brand_id))
         commit()
         spent = _rows(conn, "SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE brand_id = %s AND created_at >= %s",
@@ -152,25 +168,38 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         if crawled:
             row.update({k: crawled.get(k, 0) for k in ("fetched", "not_modified", "failed", "refused")})
         names[brand_id] = name
-        if not over and ai_client is not None:
-            row["tagged"] = step(f"tagging {name}", lambda: _tag(conn, ai_client, name, commit)) or 0
-        # answers that came back for any brand, this one's or an earlier one's, go live in this turn: no brand waits
-        # for its own answers before the next is crawled (prod run 6, 2026-11-01)
-        came_back = (step("collecting tagging answers", lambda: _collect_answers(conn, ai_client, commit)) or {}
-                     if ai_client is not None else {})
-        _count_tagged(summary, names, came_back)
-        answered.update(came_back)
+        with one_ai:
+            if not over and ai_client is not None:  # += : another worker may have counted answers in already
+                row["tagged"] += step(f"tagging {name}", lambda: _tag(conn, ai_client, name, commit)) or 0
+            # answers that came back for any brand, this one's or an earlier one's, go live in this turn: no brand
+            # waits for its own answers before the next is crawled (prod run 6, 2026-11-01)
+            came_back = (step("collecting tagging answers", lambda: _collect_answers(conn, ai_client, commit)) or {}
+                         if ai_client is not None else {})
+            _count_tagged(summary, names, came_back)
+            answered.update(came_back)
         from crawler.kb import build_and_publish
-        for built_for in [brand_id] + [b for b in came_back if b != brand_id]:
-            mine = step(f"sections for {names.get(built_for, name)}",
-                        lambda: build_and_publish(conn, brand_id=built_for, after_document=commit))
-            summary["sections_built"] += (mine or {}).get("built", 0)
+        with one_build:
+            for built_for in [brand_id] + [b for b in came_back if b != brand_id]:
+                mine = step(f"sections for {names.get(built_for, name)}",
+                            lambda: build_and_publish(conn, brand_id=built_for, after_document=commit))
+                summary["sections_built"] += (mine or {}).get("built", 0)
         step(f"host trials for {name}", lambda: _trials(conn, brand_id, name, summary))
         row["coverage"] = step(f"coverage for {name}", lambda: _coverage(
             conn, fetcher if public_lists else None, None if over else ai_client, brand_id, name, first_document,
             run_id, now, commit))
         row["waiting_for_ai"] = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS NOT NULL",
                                       (brand_id,))[0][0]
+
+    def work(conn, fetcher, commit, showing=lambda name: None):
+        while (brand := take()) is not None:
+            showing(brand[1])
+            turn(conn, fetcher, commit, *brand)
+        showing(None)
+
+    if workers > 1 and connect is not None:
+        _workers(workers, connect, make_fetcher, conn, commit, work, summary)
+    else:
+        work(conn, fetcher, commit)
 
     if ai_client is not None:  # uploads with no brand, or under a paused brand, sit where the loop above never reaches
         for brand_id, name in _rows(conn, "SELECT DISTINCT b.id, b.name FROM control.uploads u JOIN pages p ON p.id = "
@@ -322,6 +351,42 @@ def _host_line(summary, name, host, state, reason):
     if state == "stopped":
         summary["needs_you"].append(f"{name}: {host} was stopped after its trial ({reason}); `./crawl ok {host} "
                                     f"--brand \"{name}\"` approves it anyway")
+
+
+def _workers(n, connect, make_fetcher, conn, commit, work, summary):
+    """n workers take brands in turn, each on its own connection and fetcher, while the reader reads one PDF at a
+    time. A worker that fails is reported; the others take its brands."""
+    from crawler import textextract
+    from crawler.fetch import Fetcher
+
+    def worker(number):
+        mine = None
+        try:
+            mine = connect()
+            done = commit if mine is conn else mine.commit
+
+            def showing(name):  # the admin page's card for this worker (user 2026-11-06)
+                _rows(mine, "INSERT INTO control.crawl_workers (worker, brand, since) VALUES (%s, %s, now() AT TIME "
+                            "ZONE 'UTC') ON CONFLICT (worker) DO UPDATE SET brand = EXCLUDED.brand, since = "
+                            "EXCLUDED.since", (number, name))
+                done()
+
+            work(mine, (make_fetcher or Fetcher)(mine), done, showing)
+        except Exception as exc:
+            summary["needs_you"].append(f"a crawl worker stopped: {exc.__class__.__name__}: {str(exc)[:200]}")
+        finally:
+            if mine is not None and mine is not conn:
+                mine.close()
+
+    textextract.limit_readers(1)
+    try:
+        threads = [threading.Thread(target=worker, args=(k + 1,), name=f"crawl-{k + 1}") for k in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        textextract.limit_readers(None)
 
 
 def _crawl(conn, fetcher, name, max_pages, link_checker, commit):

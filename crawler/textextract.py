@@ -330,6 +330,14 @@ def drawn_text(rows):
 
 _running = set()  # reader processes now running, so an interrupted run can end them (stop_children)
 _running_lock = threading.Lock()
+_reader_slots = None  # limit_readers: a semaphore while the nightly run's crawl workers go
+
+
+def limit_readers(n):
+    """At most n readers (PDF or OCR) at once across threads; None lifts the limit. The nightly run's five crawl
+    workers read one at a time: the server has 4 GB and a read may use PDF_MEMORY_BYTES (user 2026-11-06)."""
+    global _reader_slots
+    _reader_slots = threading.BoundedSemaphore(n) if n else None
 
 
 def stop_children():
@@ -348,22 +356,23 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",  # none of the container's secrets
            "OMP_THREAD_LIMIT": "1",  # Tesseract: one thread keeps its memory inside the child's limit
            "CHILD_MEMORY_BYTES": str(memory)}
-    try:
-        proc = subprocess.Popen([sys.executable, "-I", str(child), *args], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
-    except OSError as exc:
-        raise ExtractError(f"could not start the PDF reader: {exc}") from exc
-    with _running_lock:
-        _running.add(proc)
-    try:
-        out, err = proc.communicate(data, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        raise ExtractError("the PDF took too long to read", f"{child.name}: over {timeout} seconds") from exc
-    finally:
+    with _reader_slots or contextlib.nullcontext():  # the wait for a turn is not part of the read's timeout
+        try:
+            proc = subprocess.Popen([sys.executable, "-I", str(child), *args], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
+        except OSError as exc:
+            raise ExtractError(f"could not start the PDF reader: {exc}") from exc
         with _running_lock:
-            _running.discard(proc)
+            _running.add(proc)
+        try:
+            out, err = proc.communicate(data, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            raise ExtractError("the PDF took too long to read", f"{child.name}: over {timeout} seconds") from exc
+        finally:
+            with _running_lock:
+                _running.discard(proc)
     if proc.returncode != 0:
         tail = err.decode("utf-8", "replace").strip()[-1500:] if err else ""
         raise ExtractError("could not read the PDF", f"{child.name} exit {proc.returncode}: {tail}" if tail

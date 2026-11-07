@@ -416,7 +416,7 @@ def main(argv):
                 print(f"Marked {first} and {second} as different manuals; check will not list them as duplicates.")
             elif args.command == "auto":
                 from crawler import clock
-                from crawler.auto import run_auto
+                from crawler.auto import CRAWL_WORKERS, run_auto
                 stop_at = None
                 recheck = None
                 if args.nightly:  # the cron calls this every minute: one run a night, inside the Settings tab's times
@@ -448,7 +448,7 @@ def main(argv):
                     embedder = None
                 summary = run_auto(conn, fetcher=Fetcher(conn), link_checker=_link_checker(), ai_client=ai_client,
                                    embedder=embedder, owner_connect=lambda: connect_as("migrate"), commit=conn.commit,
-                                   stop_at=stop_at, recheck=recheck)
+                                   stop_at=stop_at, recheck=recheck, workers=CRAWL_WORKERS, connect=connect_as)
                 if summary["state"] == "skipped":
                     print("Another run is still going; this one was skipped.")
                 else:

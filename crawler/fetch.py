@@ -44,6 +44,7 @@ MAX_URL_LENGTH = 2000
 READ_DEADLINE_SECONDS = 120  # a download's whole time, plus DOWNLOAD_SECONDS_PER_10MB of its size (download_seconds)
 DOWNLOAD_SECONDS_PER_10MB = 60
 DOWNLOAD_MAX_SECONDS = 900
+HOLD_SECONDS = DOWNLOAD_MAX_SECONDS + 60  # a site's turn taken (_wait_gap): longer than any request, in case its worker dies
 
 HTML_TYPES = ("text/html", "application/xhtml+xml")
 REDIRECTS = (301, 302, 303, 307, 308)
@@ -262,16 +263,32 @@ class Fetcher:
     # ------------------------------------------------------------ one request
 
     def _wait_gap(self, host_id):
-        waits = self._rows("SELECT next_allowed_at FROM hosts WHERE id = %s", (host_id,))[0][0]
-        if waits is not None and waits > self.now():
-            self.sleep((waits - self.now()).total_seconds())
+        """Waits for the site's turn and takes it (user 2026-11-06: five brands crawl at once, and brands share sites).
+        Taking it pushes next_allowed_at HOLD_SECONDS ahead, so another worker asking for the site waits while this
+        request is going; the request's end sets the real next time, GAP_SECONDS after it. A turn waited out to the
+        second it was due is taken even if the clock has not passed it."""
+        waited_for = None
+        while True:
+            now = self.now()
+            if self._rows("UPDATE hosts SET next_allowed_at = %s WHERE id = %s AND (next_allowed_at IS NULL OR "
+                          "next_allowed_at <= %s OR next_allowed_at = %s) RETURNING id",
+                          (_ceil_second(now + timedelta(seconds=HOLD_SECONDS)), host_id, now, waited_for)):
+                return
+            waits = self._rows("SELECT next_allowed_at FROM hosts WHERE id = %s", (host_id,))[0][0]
+            seconds = (waits - now).total_seconds()
+            waited_for = waits if seconds <= GAP_SECONDS else None  # longer: a request still going, or a site's Retry-After
+            self.sleep(min(seconds, GAP_SECONDS))
+
+    def _gap_after(self, host_id, gap=GAP_SECONDS):
+        self._exec("UPDATE hosts SET last_request_at = %s, next_allowed_at = %s WHERE id = %s",
+                   (self.now(), _ceil_second(self.now() + timedelta(seconds=gap)), host_id))
 
     def _render(self, host_id, url, approved):
         """One page through headless Chromium, after the same gap as any request to the host. Raw, with the final URL."""
         from crawler.render import RenderError, Renderer
-        self._wait_gap(host_id)
         if self.renderer is None:
             self.renderer = Renderer()
+        self._wait_gap(host_id)
         try:
             page = self.renderer.render(url, resolver=self.resolver, ip_allowed=self.ip_allowed, approved_hosts=approved,
                                         user_agent=USER_AGENT)
@@ -287,17 +304,20 @@ class Fetcher:
     def _get(self, host_id, target, headers, limit_for):
         """One GET to one host: resolve once, wait out the gap, connect to that address."""
         self._wait_gap(host_id)
-
         try:
-            ips = list(self.resolver(target.host))
-        except _ConnError:
+            try:
+                ips = list(self.resolver(target.host))
+            except _ConnError:
+                raise
+            except Exception as exc:
+                raise _ConnError(str(exc)) from exc
+            if not ips:
+                raise _ConnError("no address")
+            if not all(self.ip_allowed(ip) for ip in ips):
+                raise _Refused("ip")
+        except BaseException:
+            self._gap_after(host_id)  # the turn taken is given back: no request went out
             raise
-        except Exception as exc:
-            raise _ConnError(str(exc)) from exc
-        if not ips:
-            raise _ConnError("no address")
-        if not all(self.ip_allowed(ip) for ip in ips):
-            raise _Refused("ip")
         ip = ips[0]
 
         literal = f"[{ip}]" if ":" in ip else ip
