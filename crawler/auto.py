@@ -112,8 +112,6 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     step("reading the admin page's brands", lambda: _sync(conn))
     from crawler.kb import follow_trades
     summary["trades"] = step("following the brands' trades", lambda: follow_trades(conn)) or {}
-    summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0, "rejected": 0}
-    retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
     summary["sections_built"] = 0
 
     def vectors(label):
@@ -127,7 +125,15 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         if embedded and embedded.get("capped") and "embedding stopped at the monthly AI cap" not in summary["needs_you"]:
             summary["needs_you"].append("embedding stopped at the monthly AI cap")
 
-    vectors("embedding what last night built")
+    def start_of_run():
+        """Beside the workers, not before them (user 2026-11-07: prod run 19's worker cards sat idle while the run
+        re-read every PDF with a parse issue). Returns the parse-issue retry's counts."""
+        summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0,
+                                                                                 "rejected": 0}
+        retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
+        vectors("embedding what last night built")
+        return retried
+
     from crawler.clock import time_up
     summary["waiting_for_tomorrow"] = []
     names = {}
@@ -197,8 +203,13 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         showing(None)
 
     if workers > 1 and connect is not None:
-        _workers(workers, connect, make_fetcher, conn, commit, work, summary)
+        wait = _workers(workers, connect, make_fetcher, conn, commit, work, summary)
+        try:
+            retried = start_of_run()
+        finally:
+            wait()
     else:
+        retried = start_of_run()
         work(conn, fetcher, commit)
 
     if ai_client is not None:  # uploads with no brand, or under a paused brand, sit where the loop above never reaches
@@ -354,8 +365,8 @@ def _host_line(summary, name, host, state, reason):
 
 
 def _workers(n, connect, make_fetcher, conn, commit, work, summary):
-    """n workers take brands in turn, each on its own connection and fetcher, while the reader reads one PDF at a
-    time. A worker that fails is reported; the others take its brands."""
+    """Starts n workers that take brands in turn, each on its own connection and fetcher, while the reader reads one
+    PDF at a time. A worker that fails is reported; the others take its brands. Returns wait(): until all are done."""
     from crawler import textextract
     from crawler.fetch import Fetcher
 
@@ -379,14 +390,17 @@ def _workers(n, connect, make_fetcher, conn, commit, work, summary):
                 mine.close()
 
     textextract.limit_readers(1)
-    try:
-        threads = [threading.Thread(target=worker, args=(k + 1,), name=f"crawl-{k + 1}") for k in range(n)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-    finally:
-        textextract.limit_readers(None)
+    threads = [threading.Thread(target=worker, args=(k + 1,), name=f"crawl-{k + 1}") for k in range(n)]
+    for t in threads:
+        t.start()
+
+    def wait():
+        try:
+            for t in threads:
+                t.join()
+        finally:
+            textextract.limit_readers(None)
+    return wait
 
 
 def _crawl(conn, fetcher, name, max_pages, link_checker, commit):

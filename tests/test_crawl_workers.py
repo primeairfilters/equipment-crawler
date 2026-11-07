@@ -159,3 +159,27 @@ def test_the_cards_show_a_brand_only_while_a_run_is_going(runtime_conn):
     assert q(runtime_conn, cards) == ((1, None, False), (2, None, False))
     q(runtime_conn, "INSERT INTO runs (state) VALUES ('running')")
     assert q(runtime_conn, cards) == ((1, "Carrier", True), (2, None, False))
+
+
+def test_the_workers_start_crawling_while_the_start_of_the_run_is_still_going(world, monkeypatch):
+    """Prod run 19 (2026-11-07): the cards sat idle while the run re-read every PDF with a parse issue before any brand
+    was crawled (user: "I want them to be able to just keep running"). Uploads, the parse-issue retry and last night's
+    vectors now go on beside the workers."""
+    from crawler import auto
+    more_brands(world, 5)
+    crawling = threading.Event()
+    seen = {}
+
+    def crawl(conn, fetcher, name, max_pages, link_checker, commit):
+        crawling.set()
+        return {}
+
+    def retry(conn, commit):
+        seen["crawling during the retry"] = crawling.wait(timeout=3)
+        return {}
+
+    monkeypatch.setattr(auto, "_crawl", crawl)
+    monkeypatch.setattr(auto, "_retry_issues", retry)
+    summary = run(world)
+    assert summary["state"] == "done" and summary["needs_you"] == []
+    assert seen == {"crawling during the retry": True}
