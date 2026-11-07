@@ -13,8 +13,8 @@ from pathlib import Path
 
 from selectolax.lexbor import LexborHTMLParser
 
-PDF_MAX_PAGES = 300  # 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604 (251, 255, 221 pages)
-PDF_TIMEOUT_SECONDS = 180  # big Ruud manuals took 63-109 s to read (text, tables, drawn-text check); 60 s cut them off
+PDF_MAX_PAGES = 400  # 2026-11-06: was 300, which cut 17 manuals (user); 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604
+PDF_TIMEOUT_SECONDS = 240  # 2026-11-06: was 180, raised with the 400-page limit (user); big Ruud manuals took 63-109 s to read; 60 s cut them off
 LAYOUT_TIMEOUT_SECONDS = 180  # the floor; kb.read_original allows more per page
 PDF_MEMORY_BYTES = 1024 ** 3
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024

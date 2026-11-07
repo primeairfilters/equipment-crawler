@@ -26,8 +26,13 @@ def _outside(boxes):
 
 
 def find_tables(page):
-    """Ruled tables that hold data: 2+ rows with 2+ filled cells. Boxes drawn around text (a brochure panel, a one-column
-    submittal box, an empty notes grid) are not tables; their text is read as ordinary lines, once."""
+    """Ruled tables that hold data, as (bbox, rows): 2+ rows with 2+ filled cells. Boxes drawn around text (a brochure
+    panel, a one-column submittal box, an empty notes grid) are not tables; their text is read as ordinary lines, once.
+    Found and read once a page, for its text and its layout: reading a table checks every cell against every character
+    on the page, and dense spec sheets took 6-8 s a page reading each table four times (parse issues 2026-11-05)."""
+    kept = getattr(page, "_ruled_tables", None)
+    if kept is not None:
+        return kept
     kept = []
     for table in page.find_tables():
         try:
@@ -35,7 +40,8 @@ def find_tables(page):
         except Exception:
             continue
         if sum(1 for row in rows if sum(1 for cell in row if cell and cell.strip()) >= 2) >= 2:
-            kept.append(table)
+            kept.append((table.bbox, rows))
+    page._ruled_tables = kept
     return kept
 
 
@@ -67,10 +73,9 @@ def page_text(page):
         tables = find_tables(page)
         if not tables:
             return _text(page)
-        parts = [_text(page.filter(_outside([t.bbox for t in tables])))]
-        for table in tables:
-            parts.append("\n".join("\t".join((cell or "").replace("\n", " ") for cell in row)
-                                   for row in table.extract()))
+        parts = [_text(page.filter(_outside([bbox for bbox, _ in tables])))]
+        for _, rows in tables:
+            parts.append("\n".join("\t".join((cell or "").replace("\n", " ") for cell in row) for row in rows))
         return "\n".join(parts)
     except Exception:
         return _text(page)
@@ -204,7 +209,7 @@ def page_layout(page):
         tables = find_tables(page)
     except Exception:
         tables = []
-    boxes = [t.bbox for t in tables]
+    boxes = [bbox for bbox, _ in tables]
     try:
         lines = _box_lines(page, boxes)
     except Exception:
@@ -221,13 +226,10 @@ def page_layout(page):
         bold = sum("bold" in (c["fontname"] or "").lower() for c in chars) * 2 > len(chars)
         items.append({"kind": "text", "text": text, "size": round(statistics.median(c["size"] for c in chars), 1),
                       "bold": bold, "top": round(box_top, 1)})
-    for table in sorted(tables, key=lambda t: t.bbox[1]):
-        try:
-            rows = [[(cell or "").replace("\n", " ") for cell in row] for row in table.extract()]
-        except Exception:
-            continue
-        at = next((n for n, i in enumerate(items) if i["kind"] == "text" and i["top"] > table.bbox[1]), len(items))
-        items.insert(at, {"kind": "table", "rows": rows, "top": round(table.bbox[1], 1)})
+    for bbox, cells in sorted(tables, key=lambda t: t[0][1]):
+        rows = [[(cell or "").replace("\n", " ") for cell in row] for row in cells]
+        at = next((n for n, i in enumerate(items) if i["kind"] == "text" and i["top"] > bbox[1]), len(items))
+        items.insert(at, {"kind": "table", "rows": rows, "top": round(bbox[1], 1)})
     return items
 
 
@@ -314,6 +316,22 @@ def _clip_aware():
     pdfplumber.page.PDFPageInterpreter = ClipInterpreter
 
 
+def _capped_grouping():
+    """pdfminer puts text boxes in reading order by comparing every box with every other, so its time grows with the
+    square of the boxes: a Daikin spec sheet's pages of 1,400-1,700 small labels took 10-18 s each and the sheet ran
+    past the time limit (parse issues 2026-11-05). A page of more than MAX_GROUPED_BOXES is read top to bottom instead,
+    as a crowded page is; ordinary pages (under about 350 boxes) keep their columns."""
+    import pdfminer.layout as layout
+    group = layout.LTLayoutContainer.group_textboxes
+
+    def capped(self, laparams, boxes):
+        if len(boxes) > MAX_GROUPED_BOXES:
+            return [layout.LTTextGroupLRTB(boxes)]
+        return group(self, laparams, boxes)
+
+    layout.LTLayoutContainer.group_textboxes = capped
+
+
 def _stable_ids():
     """pdfminer's layout analysis breaks ties between equally distant text boxes by id(), a memory address, so lines at
     one height came out in a different order between reads (8 Ruud documents, 2026-10-28). Its module gets an id that
@@ -338,6 +356,7 @@ def _stable_ids():
     return next_page
 
 
+MAX_GROUPED_BOXES = 500  # text boxes on a page put in reading order: 330 took 0.3 s, 1,400 took 10 s
 MAX_DRAWN_PIECES = 100_000  # line pieces on a page; pdfplumber reads about 20,000 a second and holds them all
 
 
@@ -408,6 +427,7 @@ def main():
     import pdfplumber
     import pypdfium2
     _clip_aware()
+    _capped_grouping()
     next_page = _stable_ids()
 
     data = sys.stdin.buffer.read()
@@ -425,14 +445,24 @@ def main():
                     layouts.append(items)
                 quick.close()
                 continue
-            quick.close()
-            pages.append(page_text(page)[:MAX_PAGE_CHARS])
             try:
-                rows.append(drawn_rows(page))
+                text = page_text(page)[:MAX_PAGE_CHARS]
+                try:
+                    row = drawn_rows(page)
+                except Exception:
+                    row = (0, 0)
+                items = page_layout(page) if layout else None
             except Exception:
-                rows.append((0, 0))
+                # pdfminer cannot read this page at all (parse issues 101-105, 2026-11-05): pdfium reads its lines, so
+                # one bad page no longer loses the whole PDF.
+                items = plain_lines(quick)
+                text = "\n".join(i["text"] for i in items)[:MAX_PAGE_CHARS]
+                row = (0, len(items))
+            quick.close()
+            pages.append(text)
+            rows.append(row)
             if layout:
-                layouts.append(page_layout(page))
+                layouts.append(items)
             page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
             next_page()
     fast.close()

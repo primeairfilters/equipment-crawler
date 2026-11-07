@@ -75,6 +75,7 @@ def run_child(monkeypatch, page_text, closed=None):
     monkeypatch.setitem(sys.modules, "pypdfium2", fast)
     monkeypatch.setattr(pdfchild, "crowded", lambda page: False)
     monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)  # the stand-in has no pdfminer underneath to hook
+    monkeypatch.setattr(pdfchild, "_capped_grouping", lambda: None)
     monkeypatch.setattr(sys, "argv", ["pdfchild", "5"])
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4 stand-in")))
     out = io.StringIO()
@@ -156,3 +157,106 @@ def test_a_page_crowded_with_drawing_keeps_its_lines_for_the_sections():
     assert [i["text"] for i in first] == ["WIRING DIAGRAM", "Terminal R to thermostat R"]
     assert all(i["size"] == 12.0 for i in first)
     assert [i["text"] for i in pages[1]] == ["Refrigerant charging", "Charge by subcooling"]
+
+
+def _table_pdf():
+    """One page holding a ruled 3-row, 2-column table (a spec sheet's data table)."""
+    rules = ["0.5 w"] + [f"70 {y} m 300 {y} l" for y in (731, 716, 702, 687)] + [f"{x} 687 m {x} 731 l" for x in (70, 150, 300)] + ["S"]
+    return make_pdf([["Model" + " " * 16 + "SEER2", "RA15AZ" + " " * 14 + "15.2", "RA17AZ" + " " * 14 + "17.0"]], drawings=[rules])
+
+
+def test_a_pages_ruled_table_is_read_once_for_its_text_and_its_layout(monkeypatch):
+    """Prod parse issues 2026-11-05: dense Daikin, Carrier and Evapco spec tables (30,000 characters a page) took
+    6-8 s a page because each table was read four times, so a 40-page sheet ran past the 180 s limit."""
+    import pdfplumber
+    from pdfplumber.table import Table
+
+    from crawler import pdfchild
+
+    reads = []
+    real = Table.extract
+    monkeypatch.setattr(Table, "extract", lambda self, **kw: reads.append(self) or real(self, **kw))
+    with pdfplumber.open(io.BytesIO(_table_pdf()), laparams={}) as pdf:
+        page = pdf.pages[0]
+        text = pdfchild.page_text(page)
+        items = pdfchild.page_layout(page)
+
+    assert "RA15AZ\t15.2" in text  # the table really was found and read
+    assert [i["rows"] for i in items if i["kind"] == "table"] == [[["Model", "SEER2"], ["RA15AZ", "15.2"], ["RA17AZ", "17.0"]]]
+    assert len(reads) == 1
+
+
+def test_a_page_the_pdf_library_cannot_read_is_read_plainly_and_the_rest_of_the_pdf_is_kept(monkeypatch):
+    """Prod parse issues 101-105, 2026-11-05: pdfminer failed on one page of a Carrier data sheet and the whole PDF was
+    lost. That page is read by pdfium instead (its lines, no tables)."""
+    from pdfplumber.utils.exceptions import PdfminerException
+
+    from crawler import pdfchild
+
+    real = pdfchild.page_text
+    monkeypatch.setattr(pdfchild, "page_text", lambda page: real(page) if page.page_number > 1 else (_ for _ in ()).throw(PdfminerException("bad page")))
+    monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)
+    monkeypatch.setattr(pdfchild, "_stable_ids", lambda: (lambda: None))
+    monkeypatch.setattr(pdfchild, "_capped_grouping", lambda: None)  # main() would hook pdfminer for every later test
+    monkeypatch.setattr(sys, "argv", ["pdfchild", "5", "layout"])
+    pdf = make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2"], ["Refrigerant charging", "Charge by subcooling"]])
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(pdf)))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    pdfchild.main()
+    answer = json.loads(out.getvalue())
+
+    assert answer["pages"] == ["Model RA15AZ24AJ3CA\nSEER2 15.2", "Refrigerant charging\nCharge by subcooling"]
+    assert [i["text"] for i in answer["layout"][0]] == ["Model RA15AZ24AJ3CA", "SEER2 15.2"]
+
+
+def _labels_pdf(rows, cols=10):
+    """One page of small labels scattered in a grid, each its own text box (a Daikin spec sheet's diagram page)."""
+    labels = [f"BT /F1 6 Tf {40 + c * 55} {760 - r * 12} Td (L{r:02d}x{c}) Tj ET" for r in range(rows) for c in range(cols)]
+    return make_pdf([[]], drawings=[labels])
+
+
+def _grouping_spy(monkeypatch):
+    """pdfminer's box grouping, which refuses more than 500 boxes the way it ran on prod: 2.3 million comparisons and
+    11-18 s for one page of 1,400-1,700 labels (parse issues 2026-11-05)."""
+    import pdfminer.layout as layout
+
+    given = []
+    real = layout.LTLayoutContainer.group_textboxes
+
+    def spy(self, laparams, boxes):
+        given.append(len(boxes))
+        assert len(boxes) <= 500, "grouped every box against every other"
+        return real(self, laparams, boxes)
+
+    monkeypatch.setattr(layout.LTLayoutContainer, "group_textboxes", spy)
+    return given
+
+
+def test_a_page_of_too_many_text_boxes_is_read_top_to_bottom_without_grouping_them(monkeypatch):
+    import pdfplumber
+
+    from crawler import pdfchild
+
+    given = _grouping_spy(monkeypatch)
+    pdfchild._capped_grouping()
+    with pdfplumber.open(io.BytesIO(_labels_pdf(60)), laparams={}) as pdf:
+        lines = [text for _, text, _ in pdfchild._box_lines(pdf.pages[0], [])]
+
+    assert given == []  # 600 boxes never reached the grouping
+    assert len(lines) == 600
+    assert lines[0] == "L00x0" and lines.index("L00x9") < lines.index("L59x0")  # the top row first
+
+
+def test_a_page_of_few_text_boxes_is_still_grouped_into_reading_order(monkeypatch):
+    import pdfplumber
+
+    from crawler import pdfchild
+
+    given = _grouping_spy(monkeypatch)
+    pdfchild._capped_grouping()
+    with pdfplumber.open(io.BytesIO(_labels_pdf(5)), laparams={}) as pdf:
+        lines = [text for _, text, _ in pdfchild._box_lines(pdf.pages[0], [])]
+
+    assert given == [50]
+    assert len(lines) == 50
