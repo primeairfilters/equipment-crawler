@@ -366,6 +366,20 @@ def test_run_all_the_time_starts_at_most_one_run_an_hour(runtime_conn, monkeypat
     assert started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 31))
 
 
+def test_turning_run_all_the_time_on_starts_a_run_at_once_not_an_hour_after_the_last(runtime_conn, monkeypatch):
+    """User 2026-11-07: run 19 started at 06:31 and stopped at 06:41 when the switch went off; turned on again at
+    06:53, no run came until 07:31. A run that started before the Settings tab was last saved does not hold the next
+    one back; a run that started after it still does."""
+    import crawler.clock
+    monkeypatch.setattr(crawler.clock, "nonstop", lambda conn: True)
+    q(runtime_conn, "INSERT INTO runs (state, started_at, finished_at) VALUES ('done', %s, %s)",
+      (datetime(2030, 7, 1, 19, 30), datetime(2030, 7, 1, 19, 40)))
+    monkeypatch.setattr(crawler.clock, "settings_saved_at", lambda conn: datetime(2030, 7, 1, 19, 50))
+    assert started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 0))
+    monkeypatch.setattr(crawler.clock, "settings_saved_at", lambda conn: datetime(2030, 7, 1, 19, 0))
+    assert not started_a_run(runtime_conn, monkeypatch, datetime(2030, 7, 1, 20, 0))
+
+
 def test_run_all_the_time_waits_while_a_run_is_going_and_logs_nothing(runtime_conn, monkeypatch):
     """A long run (started over an hour ago) still going: the every-minute call leaves no skipped row behind."""
     import crawler.clock

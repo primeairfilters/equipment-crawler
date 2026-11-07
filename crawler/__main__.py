@@ -424,7 +424,9 @@ def main(argv):
                     if clock.nonstop(conn):  # "Run all the time": a new run when none is going, at most one an hour
                         from datetime import timedelta
                         from crawler.auto import run_going
-                        if run_going(conn) or clock.ran_since(conn, now - timedelta(hours=1)):
+                        # a run from before the switch was turned on does not count (user 2026-11-07)
+                        since = max(now - timedelta(hours=1), clock.settings_saved_at(conn))
+                        if run_going(conn) or clock.ran_since(conn, since):
                             return 0
                     else:
                         window = clock.nightly_window(now, *clock.window_times(conn))

@@ -55,6 +55,14 @@ def nonstop(conn):
     return bool(row and row[0])
 
 
+def settings_saved_at(conn):
+    """When the Settings tab was last saved (turning "Run all the time" on saves it)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT updated_at FROM control.settings WHERE id = 1")
+        row = cur.fetchone()
+    return row[0] if row else datetime.min
+
+
 def current_stop(conn, now_utc):
     """The stop a going nightly run should have now: None with the switch on, else the times' stop, or now when it is
     outside the times."""
