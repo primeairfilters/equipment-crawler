@@ -131,6 +131,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0,
                                                                                  "rejected": 0}
         retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
+        step("parse issue list", lambda: _report_if_stale(conn, commit))
         vectors("embedding what last night built")
         return retried
 
@@ -195,6 +196,9 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
             run_id, now, commit))
         row["waiting_for_ai"] = _rows(conn, "SELECT COUNT(*) FROM pages WHERE brand_id = %s AND ai_batch_id IS NOT NULL",
                                       (brand_id,))[0][0]
+        # The admin page's "Download for Claude" hands over the stored fix list, so it follows the problems found
+        # during the day, not just the night's scan (user 2026-11-07).
+        step("parse issue list", lambda: _report_if_stale(conn, commit))
 
     def work(conn, fetcher, commit, showing=lambda name: None):
         while (brand := take()) is not None:
@@ -328,6 +332,13 @@ def _scan_issues(conn, now):
             "new": _rows(conn, "SELECT COUNT(*) FROM parse_issues WHERE first_seen_at >= %s", (now,))[0][0],
             "fixed": _rows(conn, "SELECT COUNT(*) FROM parse_issues WHERE state = 'fixed'")[0][0] - fixed_before,
             "scanned_at": start}
+
+
+def _report_if_stale(conn, commit):
+    from crawler.issues import report_if_stale
+    written = report_if_stale(conn) is not None
+    commit()
+    return written
 
 
 def _uploads(conn, commit):

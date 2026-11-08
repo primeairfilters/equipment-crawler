@@ -11,7 +11,8 @@ Each night (`auto`): retry, then scan, then the Markdown report.
   upload queued again), the document sent for tagging again, or left to the rebuild a new build version starts. One
   that is not seen again is 'fixed' with the version that fixed it; one seen again stays open under the new version.
 - scan: the stored-state checks, and the document link for problems recorded before their document existed.
-- report: every open problem as one Markdown fix list (control.issue_report), the same as `./crawl issues`.
+- report: every open problem as one Markdown fix list (control.issue_report), the same as `./crawl issues`. Also
+  rewritten after each brand's turn when a problem turned up since (report_if_stale), so it is never a day behind.
 A 'wont_fix' problem (set on the admin page) is never retried. Nothing here deletes; callers commit.
 """
 import json
@@ -214,6 +215,22 @@ def retry(conn, after_document=None):
               "WHERE document_id = i.document_id)) AND p.extraction_status = 'extracted' "
               "AND p.ai_extractor_version = %s) RETURNING i.id", (tagger, tagger)))
     return out
+
+
+def report_if_stale(conn, now=None):
+    """Rewrite the report when it no longer matches the open problems: their number changed, or one was seen after
+    it was made. Returns the new text, or None when it was still current. User 2026-11-07: the admin page's "Download
+    for Claude" hands over this report and moves only the issues it lists, but it was written once a night while the
+    crawler found problems all day (prod: 40 of 88 open issues missing). Called after each brand's turn."""
+    made = _rows(conn, "SELECT made_at, open_issues FROM control.issue_report WHERE name = 'latest'")
+    if made:
+        made_at, listed = made[0]
+        open_now = _rows(conn, "SELECT COUNT(*) FROM parse_issues WHERE state = 'open'")[0][0]
+        seen_since = _rows(conn, "SELECT 1 FROM parse_issues WHERE state = 'open' AND last_seen_at > %s LIMIT 1",
+                           (made_at,))
+        if open_now == listed and not seen_since:
+            return None
+    return report(conn, now)
 
 
 def report(conn, now=None):

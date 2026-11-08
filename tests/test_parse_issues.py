@@ -256,6 +256,22 @@ def test_the_fix_list_is_markdown_grouped_by_kind_and_kept_for_the_admin_page(ru
     assert stored[0] == text and stored[1] >= 1
 
 
+def test_the_fix_list_is_rewritten_when_a_problem_turns_up_after_it(runtime_conn, short_reader):
+    """User 2026-11-07: the admin page's "Download for Claude" hands over the stored report and moves only the issues it
+    lists, but the report was written once a night while the crawler found problems all day (prod: 40 of 88 open
+    issues missing). After each brand's turn the run now rewrites it when it is out of date. Written before the change."""
+    from crawler.issues import report, report_if_stale
+    report(runtime_conn)
+    assert report_if_stale(runtime_conn) is None, "nothing new: the report is left as it is"
+
+    body = a_pdf(3)
+    _, _, document_id = stored_doc(runtime_conn, body)  # records a cut_at_page_limit problem after the report
+    text = report_if_stale(runtime_conn)
+    assert text is not None and f"document {document_id}" in text
+    stored = q(runtime_conn, "SELECT markdown FROM control.issue_report WHERE name = 'latest'")[0][0]
+    assert stored == text
+
+
 def test_the_admin_page_reads_issues_and_can_only_set_one_aside(admin_conn):
     with admin_conn.cursor() as cur:
         cur.execute("SELECT * FROM control.parse_issues LIMIT 1")
