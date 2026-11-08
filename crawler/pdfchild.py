@@ -1,6 +1,7 @@
 """Reads a PDF from stdin and prints its page texts as JSON. Run only as a child process with limits.
 
-`pdfchild.py <max_pages>` prints {"pages": [text, ...]}. `pdfchild.py <max_pages> layout` also prints
+`pdfchild.py <max_pages>` prints {"pages": [text, ...]}. `pdfchild.py <max_pages> layout <floor> <per_page>` also sets its
+own time limit once it knows the page count (main). `pdfchild.py <max_pages> layout` also prints
 {"layout": [[item, ...] per page]}: text lines with their font size and boldness, and ruled tables as rows, in
 reading order (for the sectioner, P12). Both print {"rows": [[drawn, real] per page]}: lines of text drawn as shapes
 and lines of real text, so the parent can tell a text layer that holds only fragments.
@@ -11,6 +12,7 @@ Text outside its clipping path is not read: a viewer never shows it, but pdfmine
 import io
 import json
 import re
+import signal
 import statistics
 import sys
 
@@ -332,6 +334,127 @@ def _capped_grouping():
     layout.LTLayoutContainer.group_textboxes = capped
 
 
+def _fast_tables():
+    """pdfplumber's two table steps, made fast with the same answers. It found a table's cells by scanning every grid
+    corner for each corner, and read the cells by checking every character on the page against every row and then
+    every cell: on 20 Evapco spec PDFs (one ruled table of 28,000-36,000 characters a page) that was 6.3 million
+    checks and 4.4 s a page, and the PDFs ran past the time limit (parse issues 2026-11-07). Here the corners are
+    grouped by column and by row, and the characters are sorted by their middles and picked out by bisection."""
+    import bisect
+
+    import pdfplumber.table as table
+    from pdfplumber import utils
+
+    def intersections_to_cells(intersections):
+        v = {p: set(map(utils.obj_to_bbox, e["v"])) for p, e in intersections.items()}
+        h = {p: set(map(utils.obj_to_bbox, e["h"])) for p, e in intersections.items()}
+        columns, lines, at = {}, {}, {}
+        for p in sorted(intersections):
+            column, line = columns.setdefault(p[0], []), lines.setdefault(p[1], [])
+            at[p] = (len(column), len(line))
+            column.append(p)
+            line.append(p)
+        cells = []
+        for p in sorted(intersections):
+            below, right = columns[p[0]][at[p][0] + 1:], lines[p[1]][at[p][1] + 1:]
+            cell = None
+            for b in below:  # pdfplumber's order: the nearest corner below, then the nearest to the right
+                if v[p] & v[b]:
+                    for r in right:
+                        corner = (r[0], b[1])
+                        if h[p] & h[r] and corner in intersections and v[corner] & v[r] and h[corner] & h[b]:
+                            cell = (p[0], p[1], corner[0], corner[1])
+                            break
+                    if cell:
+                        break
+            if cell:
+                cells.append(cell)
+        return cells
+
+    def extract(self, **kwargs):
+        chars = self.page.chars
+        mids = sorted(((c["top"] + c["bottom"]) / 2, (c["x0"] + c["x1"]) / 2, n) for n, c in enumerate(chars))
+        tops = [m[0] for m in mids]
+        rows = []
+        for row in self.rows:
+            x0, top, x1, bottom = row.bbox
+            in_row = sorted((m for m in mids[bisect.bisect_left(tops, top):bisect.bisect_left(tops, bottom)]
+                             if x0 <= m[1] < x1), key=lambda m: m[1])
+            lefts = [m[1] for m in in_row]
+            out = []
+            for cell in row.cells:
+                if cell is None:
+                    out.append(None)
+                    continue
+                picked = sorted(n for v_mid, _, n in in_row[bisect.bisect_left(lefts, cell[0]):bisect.bisect_left(lefts, cell[2])]
+                                if cell[1] <= v_mid < cell[3])  # the page's own order, as pdfplumber keeps it
+                if not picked:
+                    out.append("")
+                    continue
+                if "layout" in kwargs:
+                    kwargs.update(layout_width=cell[2] - cell[0], layout_height=cell[3] - cell[1], layout_bbox=cell)
+                out.append(utils.extract_text([chars[n] for n in picked], **kwargs))
+            rows.append(out)
+        return rows
+
+    table.intersections_to_cells = intersections_to_cells
+    table.Table.extract = extract
+
+
+def _fast_objects():
+    """pdfplumber's Page.process_object (0.11.10, pinned), made fast with the same dicts. It ran a regex on each object's
+    class name and its recursive resolve on every attribute, plain numbers and strings too: half the 1.5 s a page that
+    Evapco spec PDFs of 34,000 characters a page took to parse (parse issues 2026-11-08). Here the kind is kept per
+    class and only values that can hold a reference (lists, dicts, other objects) are resolved."""
+    import pdfplumber.page as plumber
+    from pdfminer.layout import LTChar, LTCurve, LTTextContainer
+
+    plain = {float, int, str, bool, type(None)}
+    kinds = {}
+
+    def value(v):
+        if type(v) in plain or (type(v) is tuple and all(type(i) in plain for i in v)):
+            return v  # resolve_all gives these back as they are (a tuple as an equal one)
+        return plumber.resolve_all(v)
+
+    def process_object(self, obj):
+        cls = obj.__class__
+        kind = kinds.get(cls)
+        if kind is None:
+            kind = kinds[cls] = re.sub(plumber.lt_pat, "", cls.__name__).lower()
+        attr = {k: value(v) for k, v in obj.__dict__.items() if k in plumber.ALL_ATTRS}
+        attr["object_type"] = kind
+        attr["page_number"] = self.page_number
+        for cs in ("ncs", "scs"):
+            if hasattr(obj, cs):
+                attr[cs] = plumber.resolve_and_decode(getattr(obj, cs).name)
+        if isinstance(obj, (LTChar, LTTextContainer)):
+            text = obj.get_text()
+            attr["text"] = (plumber.normalize_unicode(self.pdf.unicode_norm, text)
+                            if self.pdf.unicode_norm is not None else text)
+        if isinstance(obj, LTChar):
+            gs = obj.graphicstate
+            attr["stroking_color"] = gs.scolor if isinstance(gs.scolor, tuple) else (gs.scolor,)
+            attr["non_stroking_color"] = gs.ncolor if isinstance(gs.ncolor, tuple) else (gs.ncolor,)
+            if isinstance(attr["fontname"], bytes):
+                attr["fontname"] = plumber.fix_fontname_bytes(attr["fontname"])
+        elif isinstance(obj, LTCurve):
+            attr["pts"] = list(map(self.point2coord, attr["pts"]))
+            attr["path"] = [(cmd, *map(self.point2coord, pts)) for cmd, *pts in obj.original_path]
+            attr["dash"] = obj.dashing_style
+        mb_x0, mb_top = self.mediabox[:2]
+        if "y0" in attr:
+            attr["top"] = (self.height - attr["y1"]) + mb_top
+            attr["bottom"] = (self.height - attr["y0"]) + mb_top
+            attr["doctop"] = self.initial_doctop + attr["top"]
+        if "x0" in attr and mb_x0 != 0:
+            attr["x0"] = attr["x0"] + mb_x0
+            attr["x1"] = attr["x1"] + mb_x0
+        return attr
+
+    plumber.Page.process_object = process_object
+
+
 def _stable_ids():
     """pdfminer's layout analysis breaks ties between equally distant text boxes by id(), a memory address, so lines at
     one height came out in a different order between reads (8 Ruud documents, 2026-10-28). Its module gets an id that
@@ -424,10 +547,13 @@ def plain_lines(page):
 def main():
     max_pages = int(sys.argv[1])
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
+    floor, per_page = (int(sys.argv[3]), int(sys.argv[4])) if len(sys.argv) > 4 else (None, None)
     import pdfplumber
     import pypdfium2
     _clip_aware()
     _capped_grouping()
+    _fast_tables()
+    _fast_objects()
     next_page = _stable_ids()
 
     data = sys.stdin.buffer.read()
@@ -435,6 +561,14 @@ def main():
     fast = pypdfium2.PdfDocument(data)
     with pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {})) as pdf:
         total = len(pdf.pages)  # more than max_pages: the document was cut (a parse issue)
+        if floor is not None:
+            # the limit grows with the pages read (400-page York and Evapco manuals ran past one 240 s limit, parse
+            # issues 2026-11-07); SIGALRM's default ends the process even inside pdfium's C code
+            pages_read = min(total, max_pages)
+            limit = max(floor, per_page * pages_read)
+            sys.stderr.write(f"pdfchild.py: time limit {limit} s for {pages_read} pages\n")
+            sys.stderr.flush()
+            signal.alarm(limit)
         for number, page in enumerate(pdf.pages[:max_pages]):
             quick = fast[number]
             if crowded(quick):

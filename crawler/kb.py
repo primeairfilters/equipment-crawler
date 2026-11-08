@@ -25,7 +25,7 @@ from crawler.store import alias_key
 from crawler.textextract import LAYOUT_TIMEOUT_SECONDS, ExtractError, extract_layout
 from crawler.uploads import UPLOADS_HOST
 
-LAYOUT_SECONDS_PER_PAGE = 5
+LAYOUT_SECONDS_PER_PAGE = textextract.PDF_SECONDS_PER_PAGE  # one rate for the crawl read and the layout read
 
 FILTERS = ("manufacturer_id", "trade", "equipment_type", "doc_type", "language")
 

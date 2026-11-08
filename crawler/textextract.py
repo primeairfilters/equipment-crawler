@@ -13,8 +13,12 @@ from pathlib import Path
 
 from selectolax.lexbor import LexborHTMLParser
 
-PDF_MAX_PAGES = 400  # 2026-11-06: was 300, which cut 17 manuals (user); 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604
+PDF_MAX_PAGES = 800  # 2026-11-08: was 400, which cut 14 manuals of 405-690 pages; all 21 cut ones read whole in 25-155 s
+# on the Mac with at most 545 MB (user); 2026-11-06: was 300, which cut 17 manuals (user); 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604
 PDF_TIMEOUT_SECONDS = 240  # 2026-11-06: was 180, raised with the 400-page limit (user); big Ruud manuals took 63-109 s to read; 60 s cut them off
+PDF_SECONDS_PER_PAGE = 5  # 2026-11-08: the crawl read's limit grows with its pages, from PDF_TIMEOUT_SECONDS up (a dense
+# 71-page Evapco spec PDF takes about 2.4 s a page on the Mac, a 400-page York manual 0.5 s); kb.read_original uses it too
+CHILD_START_SECONDS = 30  # the reader's own limit starts once it has opened the PDF; the parent waits this much longer
 LAYOUT_TIMEOUT_SECONDS = 180  # the floor; kb.read_original allows more per page
 PDF_MEMORY_BYTES = 1024 ** 3
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
@@ -137,7 +141,8 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
         pages.append(items)
     wanted = [n for n, items in enumerate(pages)  # a table is text; a captioned drawing keeps its caption
               if not items or (all(i["kind"] == "text" for i in items)
-                               and caption_only("\n".join(i["text"] for i in items)))]
+                               and caption_only("\n".join(i["text"] for i in items)))
+              or unreadable_font("\n".join(i.get("text", "") for i in layout[n] if i.get("kind") != "table"))]
     read = ocr_pages(data, wanted, memory, strict=True)
     for n, lines in read.items():
         lines = [dict(line, text=clean(line["text"]).strip("| ")) for line in lines]  # a ruling beside a line reads as "|"
@@ -212,24 +217,32 @@ def _write_whole(path, value):
             part.unlink(missing_ok=True)
 
 
-def _read(data, max_pages, timeout, memory):
+def _read(data, max_pages, timeout, memory, per_page=0):
     """The reader's answer for this PDF: the kept one, else one layout read, kept. One read serves the crawl's text
-    (extract_pdf) and the section build's layout (extract_layout) (user, 2026-11-02: a new PDF was read twice)."""
+    (extract_pdf) and the section build's layout (extract_layout) (user, 2026-11-02: a new PDF was read twice).
+    per_page: the reader sets its own limit, timeout or per_page seconds a page read when that is more, and the parent
+    waits for the longest that can be (PDF_MAX_PAGES pages)."""
     raw = _kept_layout(data, max_pages)
-    if raw is None:
+    if raw is None and per_page:
+        raw = _run_child(data, [str(max_pages), "layout", str(timeout), str(per_page)],
+                         max(timeout, per_page * max_pages) + CHILD_START_SECONDS, memory)
+        _keep_layout(data, max_pages, raw)
+    elif raw is None:
         raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
         _keep_layout(data, max_pages, raw)
     return raw
 
 
-def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
-    """Parsed in a child process with a time and memory limit; over-long documents are cut. Pages with no text layer
-    (empty, or text drawn as shapes) are read with OCR when Tesseract is there (ocr_pages)."""
-    raw = _read(data, max_pages, timeout, memory)
+def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES,
+                per_page=PDF_SECONDS_PER_PAGE):
+    """Parsed in a child process with a time and memory limit (growing with the pages, _read); over-long documents are
+    cut. Pages with no text layer (empty, or text drawn as shapes) are read with OCR when Tesseract is there."""
+    raw = _read(data, max_pages, timeout, memory, per_page)
     blank = drawn_pages(raw.get("rows"))
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
     left_out = set()
-    read = ocr_pages(data, [n for n, text in enumerate(pages) if not text or caption_only(text)], memory,
+    read = ocr_pages(data, [n for n, text in enumerate(pages)
+                            if not text or caption_only(text) or unreadable_font(raw["pages"][n])], memory,
                      left_out=left_out)
     for n, lines in read.items():
         pages[n] = clean("\n".join([pages[n]] + [line["text"] for line in _added(lines, pages[n].splitlines())]))
@@ -373,6 +386,8 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
         finally:
             with _running_lock:
                 _running.discard(proc)
+    if proc.returncode == -signal.SIGALRM:  # the reader's own time limit (pdfchild.main), named on its stderr
+        raise ExtractError("the PDF took too long to read", err.decode("utf-8", "replace").strip()[-300:] or None)
     if proc.returncode != 0:
         tail = err.decode("utf-8", "replace").strip()[-1500:] if err else ""
         raise ExtractError("could not read the PDF", f"{child.name} exit {proc.returncode}: {tail}" if tail
@@ -394,6 +409,7 @@ _NOT_A_CAPTION = re.compile(r"(notes?|memo|page|espa[ñn]ol|fran[çc]ais|english
                             re.I)
 
 
+UNREADABLE_GLYPHS = 20  # a logo or symbol in a font with no text map is a few; a page of text in one is hundreds
 CAPTION_MAX_WORDS = 8  # a running header and a short caption ("OPERATION Remote Control 42"); a page of text has more
 
 
@@ -406,6 +422,14 @@ def caption_only(text):
         return False
     words = " ".join(re.findall(r"[^\W\d_]+", text))
     return bool(re.search(r"[^\W\d_]{4,}", words)) and not _NOT_A_CAPTION.match(words)
+
+
+def unreadable_font(raw):
+    """A page's text layer mostly in a font with no text map: its glyphs come out as (cid:N) and clean drops them, so
+    only a few labels may be left ("A 1 D B" on CaptiveAire's clearance sheets, 2026-11-08). At least UNREADABLE_GLYPHS
+    such glyphs and more than the letters kept: read the page with OCR."""
+    dropped = len(re.findall(r"\(cid:\d+\)", raw or ""))
+    return dropped >= UNREADABLE_GLYPHS and dropped > len(re.findall(r"[^\W\d_]", clean(raw)))
 
 
 def _squash(text):

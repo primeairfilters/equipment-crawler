@@ -152,3 +152,5 @@ def test_the_page_limit_reads_the_longest_ruud_manuals_whole():
     # 2026-10-29: docs 799, 800 and 604 (251, 255 and 221 pages) were cut at 200
     from crawler.textextract import PDF_MAX_PAGES
     assert PDF_MAX_PAGES >= 255
+    # 2026-11-08: 14 Daikin, Gree, Schneider and Yaskawa manuals (405-690 pages) were cut at 400
+    assert PDF_MAX_PAGES >= 690

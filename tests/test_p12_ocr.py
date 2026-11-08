@@ -348,3 +348,67 @@ def test_when_ocr_fails_on_every_page_sections_still_fail_and_nothing_is_remembe
     with pytest.raises(crawler.textextract.ExtractError):
         crawler.textextract.extract_layout(b"%PDF-1.4 two scanned pages")
     assert calls  # a broken reader is tried again next run
+
+
+UNREADABLE = "(cid:41)(cid:76)(cid:81)(cid:74)(cid:79)(cid:72)" * 60  # a font with no text map: every glyph a cid
+
+
+def test_a_page_whose_font_cannot_be_read_is_read_with_ocr_though_a_few_labels_are_readable(monkeypatch):
+    # 2026-11-08: CaptiveAire's clearance sheets print their text in a font with no text map; only a drawing's labels
+    # ("A 1 D B") were left, so the page was neither empty nor a caption and never read with OCR (mostly_scanned)
+    import crawler.textextract as t
+    monkeypatch.setattr(t, "_read", lambda *a, **k: {"pages": [UNREADABLE + "\nA 1\nD B", "A 1\nD B"]})
+    asked = []
+    monkeypatch.setattr(t, "_ocr_child", lambda data, indexes, memory: asked.extend(indexes) or
+                        {str(n): [{"text": "Single Wall Clearances and Clearance Plates", "confidence": 90}] for n in indexes})
+    found = t.extract_pdf(b"%PDF")
+    assert asked == [0] and "Single Wall Clearances" in found.pages[0] and found.ocr_pages == {0}
+
+
+def test_the_section_build_reads_a_page_whose_font_cannot_be_read_with_ocr(monkeypatch):
+    import crawler.textextract as t
+    page = [{"kind": "text", "text": UNREADABLE, "size": 10}, {"kind": "text", "text": "A 1 D B", "size": 8}]
+    monkeypatch.setattr(t, "_read", lambda *a, **k: {"layout": [page, [{"kind": "text", "text": "A 1 D B", "size": 8}]]})
+    asked = []
+    monkeypatch.setattr(t, "_ocr_child", lambda data, indexes, memory: asked.extend(indexes) or
+                        {str(n): [{"text": "Single Wall Clearances and Clearance Plates", "confidence": 90}] for n in indexes})
+    pages = t.extract_layout(b"%PDF")
+    assert asked == [0] and any(i.get("ocr") and "Single Wall" in i["text"] for i in pages[0])
+
+
+def test_a_huge_drawing_sheet_is_drawn_for_ocr_at_no_more_than_max_pixels(monkeypatch):
+    # 2026-11-08: a 42 x 30 inch as-built sheet at 300 dpi is 114 million pixels; Tesseract ran past the limit. Its
+    # notes read in 3 s at 100 dpi
+    import subprocess
+    from crawler import ocrchild
+    drawn = []
+
+    class Page:
+        def get_size(self):
+            return 3039, 2160
+
+        def render(self, scale, grayscale):
+            drawn.append(scale)
+            raise subprocess.TimeoutExpired("stop", 0)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        ocrchild.read_page(Page())
+    assert 3039 * 2160 * drawn[0] ** 2 <= ocrchild.MAX_PIXELS and drawn[0] > 100 / 72
+
+
+def test_a_letter_page_is_still_drawn_for_ocr_at_300_dpi():
+    import subprocess
+    from crawler import ocrchild
+    drawn = []
+
+    class Page:
+        def get_size(self):
+            return 612, 792
+
+        def render(self, scale, grayscale):
+            drawn.append(scale)
+            raise subprocess.TimeoutExpired("stop", 0)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        ocrchild.read_page(Page())
+    assert drawn == [300 / 72]

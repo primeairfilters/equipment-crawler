@@ -3,7 +3,7 @@
 One crawl.parse_issues row per file (content_sha) and kind, stamped with the version of the code part that failed:
 - reader (textextract.reader_version: pdfchild.py, ocrchild.py, textextract.py and the PDF libraries):
   unreadable, cut_at_page_limit (recorded where the PDF is read), mostly_scanned and garbled_text (found by scan);
-- tagger (extract.EXTRACTOR_VERSION): tagging_failed (recorded where the AI's answer is stored);
+- tagger (extract.EXTRACTOR_VERSION and the answer's room, DEFAULT_MAX_TOKENS): tagging_failed (recorded where the AI's answer is stored);
 - sectioner (kb.build_version): no_sections (a live manual with no live sections, found by scan).
 
 Each night (`auto`): retry, then scan, then the Markdown report.
@@ -67,8 +67,8 @@ def version(component):
         from crawler.textextract import reader_version
         return reader_version()
     if component == "tagger":
-        from crawler.extract import EXTRACTOR_VERSION
-        return EXTRACTOR_VERSION
+        from crawler import extract  # more room retries an answer cut at the limit, without re-tagging every document
+        return f"{extract.EXTRACTOR_VERSION}/{extract.DEFAULT_MAX_TOKENS}"
     from crawler.kb import build_version
     return build_version()
 
@@ -213,7 +213,7 @@ def retry(conn, after_document=None):
               "WHERE i.state = 'retrying' AND i.component = 'tagger' AND EXISTS (SELECT 1 FROM pages p "
               "WHERE (p.id = (i.detail ->> 'page_id')::bigint OR p.id IN (SELECT page_id FROM document_urls "
               "WHERE document_id = i.document_id)) AND p.extraction_status = 'extracted' "
-              "AND p.ai_extractor_version = %s) RETURNING i.id", (tagger, tagger)))
+              "AND p.ai_extractor_version = %s) RETURNING i.id", (tagger, tagger.split("/")[0])))
     return out
 
 
@@ -247,7 +247,7 @@ def report(conn, now=None):
     lines = [f"# Crawler parse issues ({now:%Y-%m-%d %H:%M} UTC)", "",
              f"{len(rows)} open problem(s) the crawler's code could not handle. Fix the code (repo equipment-crawler), "
              "test-first, so each kind below is handled; the version of the part you change moves with the change "
-             "(the reader's from its files, the tagger's EXTRACTOR_VERSION, the sectioner's SECTIONER_VERSION), and the "
+             "(the reader's from its files, the tagger's EXTRACTOR_VERSION or DEFAULT_MAX_TOKENS, the sectioner's SECTIONER_VERSION), and the "
              "next nightly run takes these documents again and marks each fixed or still open.", "",
              f"Versions now: reader `{versions['reader']}`, tagger `{versions['tagger']}`, sectioner "
              f"`{versions['sectioner']}`. Originals are in the docs bucket (or DOCS_DIR) as `<sha256>.<type>` (pdf, xlsx, csv, docx, pptx, html, mht, jpg, png).", ""]

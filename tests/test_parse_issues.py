@@ -191,7 +191,25 @@ def test_after_a_tagger_fix_the_document_is_tagged_again_and_marked_fixed(runtim
     settle(runtime_conn, FakeAI(lambda r: tags()), name)
     retry(runtime_conn)
     state, *_, fixed = issue(runtime_conn, body, "tagging_failed")
-    assert (state, fixed) == ("fixed", "tagger-after-fix")
+    assert (state, fixed) == ("fixed", f"tagger-after-fix/{crawler.extract.DEFAULT_MAX_TOKENS}")
+
+
+def test_more_room_for_the_ai_answer_tags_a_cut_answer_again_without_tagging_every_document(runtime_conn, monkeypatch):
+    # 2026-11-08: Evapco spec sheets and a coil spreadsheet list hundreds of models; the answer stopped at the
+    # 4000-token limit as cut JSON. A bigger limit is a tagger change for the issue list, not a reason to re-tag all
+    import crawler.extract
+    from crawler.issues import retry
+    name, brand_id = new_brand(runtime_conn)
+    body = a_pdf(1, "Model RA15AZ24AJ3CA")
+    make_page(runtime_conn, brand_id, body, is_pdf=True)
+    settle(runtime_conn, FakeAI(lambda r: '{"doc_type":"spec_sheet","models":["RA15AZ24AJ3CA","RA15'), name)
+    monkeypatch.setattr(crawler.extract, "DEFAULT_MAX_TOKENS", crawler.extract.DEFAULT_MAX_TOKENS * 4)
+    retry(runtime_conn)
+    assert issue(runtime_conn, body, "tagging_failed")[0] == "retrying"
+    settle(runtime_conn, FakeAI(lambda r: tags()), name)
+    retry(runtime_conn)
+    state, *_, fixed = issue(runtime_conn, body, "tagging_failed")
+    assert state == "fixed" and fixed.startswith(crawler.extract.EXTRACTOR_VERSION + "/")
 
 
 def test_an_upload_the_reader_failed_on_is_queued_again_after_a_fix(runtime_conn, monkeypatch):

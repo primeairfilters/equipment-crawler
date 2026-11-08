@@ -76,6 +76,8 @@ def run_child(monkeypatch, page_text, closed=None):
     monkeypatch.setattr(pdfchild, "crowded", lambda page: False)
     monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)  # the stand-in has no pdfminer underneath to hook
     monkeypatch.setattr(pdfchild, "_capped_grouping", lambda: None)
+    monkeypatch.setattr(pdfchild, "_fast_tables", lambda: None)
+    monkeypatch.setattr(pdfchild, "_fast_objects", lambda: None)
     monkeypatch.setattr(sys, "argv", ["pdfchild", "5"])
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"%PDF-1.4 stand-in")))
     out = io.StringIO()
@@ -186,6 +188,130 @@ def test_a_pages_ruled_table_is_read_once_for_its_text_and_its_layout(monkeypatc
     assert len(reads) == 1
 
 
+def _dense_table_pdf(rows=40, cols=8):
+    """A dense ruled spec table: rows x cols cells, each with its own label, except one empty cell (3, 3) and one
+    merged cell (row 0, columns 1 and 2: the rule between them is not drawn)."""
+    ys = [760 - r * 14 for r in range(rows + 1)]
+    xs = [40 + c * 64 for c in range(cols + 1)]
+    rules = ["0.5 w"] + [f"{xs[0]} {y} m {xs[-1]} {y} l" for y in ys]
+    rules += [f"{x} {ys[r + 1]} m {x} {ys[r]} l" for c, x in enumerate(xs) for r in range(rows) if (r, c) != (0, 2)]
+    labels = [f"BT /F1 7 Tf {xs[c] + 3} {ys[r] - 10} Td (R{r}C{c}) Tj ET"
+              for r in range(rows) for c in range(cols) if (r, c) != (3, 3)]
+    return make_pdf([[]], drawings=[rules + ["S"] + labels])
+
+
+def test_a_dense_ruled_table_is_read_as_pdfplumber_reads_it_without_its_slow_cell_steps(monkeypatch):
+    """Prod parse issues 2026-11-07: 20 Evapco spec PDFs (pages of 28,000-36,000 characters in one ruled table) ran past
+    the time limit. pdfplumber found each table's cells by comparing every grid corner with every other, and read
+    them by checking every character against every row: 6.3 million checks and 4.4 s for one page. The reader finds
+    and reads the same cells through a sorted index, and the rows come out exactly as pdfplumber's own."""
+    import pdfplumber
+    import pdfplumber.table as table
+
+    from crawler import pdfchild
+
+    data = _dense_table_pdf()
+    with pdfplumber.open(io.BytesIO(data), laparams={}) as pdf:
+        expected = [t.extract() for t in pdf.pages[0].find_tables()]
+    assert expected[0][0][:3] == ["R0C0", "R0C1 R0C2", None] and expected[0][3][3] == ""  # merged and empty cells
+
+    slow = []
+    real_cells, real_extract = table.intersections_to_cells, table.Table.extract
+    monkeypatch.setattr(table, "intersections_to_cells", lambda *a: slow.append("cells") or real_cells(*a))
+    monkeypatch.setattr(table.Table, "extract", lambda self, **kw: slow.append("extract") or real_extract(self, **kw))
+    pdfchild._fast_tables()
+    with pdfplumber.open(io.BytesIO(data), laparams={}) as pdf:
+        page = pdf.pages[0]
+        found = [rows for _, rows in pdfchild.find_tables(page)]
+
+    assert slow == []
+    assert found == expected
+
+
+def test_a_pages_characters_and_drawing_come_out_as_pdfplumber_makes_them_without_resolving_plain_values(monkeypatch):
+    """Prod parse issues 2026-11-08: Evapco spec PDFs of 34,000 characters a page still took 1.5 s a page to parse, half
+    of it pdfplumber turning each character into its dict: a regex on the class name and a recursive resolve of every
+    attribute, plain numbers and strings too. The reader makes the same dicts and resolves only what can hold a
+    reference."""
+    import pdfplumber
+    import pdfplumber.page as plumber_page
+
+    from crawler import pdfchild
+
+    data = _dense_table_pdf(rows=12, cols=4)
+    with pdfplumber.open(io.BytesIO(data), laparams={}) as pdf:
+        expected = pdf.pages[0].objects
+    assert len(expected["char"]) > 150 and expected["line"] and "rect" not in expected
+
+    resolved = []
+    real = plumber_page.resolve_all
+    monkeypatch.setattr(plumber_page, "resolve_all", lambda v: resolved.append(v) or real(v))
+    monkeypatch.setattr(plumber_page.Page, "process_object", plumber_page.Page.process_object)
+    pdfchild._fast_objects()
+    with pdfplumber.open(io.BytesIO(data), laparams={}) as pdf:
+        found = pdf.pages[0].objects
+
+    assert found == expected
+    assert not [v for v in resolved if isinstance(v, (int, float, str))]
+
+
+def _main_with_limit(monkeypatch, pdf, floor, per_page):
+    """pdfchild.main() in-process with a time limit asked for; returns the alarms it set and what it said on stderr."""
+    from crawler import pdfchild
+
+    alarms = []
+    monkeypatch.setattr(pdfchild.signal, "alarm", alarms.append)
+    for hook in ("_clip_aware", "_capped_grouping", "_fast_tables", "_fast_objects"):
+        monkeypatch.setattr(pdfchild, hook, lambda: None)  # main() would hook the PDF libraries for every later test
+    monkeypatch.setattr(pdfchild, "_stable_ids", lambda: (lambda: None))
+    monkeypatch.setattr(sys, "argv", ["pdfchild", "5", "layout", str(floor), str(per_page)])
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(pdf)))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    pdfchild.main()
+    return alarms, err.getvalue()
+
+
+def test_the_readers_time_limit_grows_with_the_pages_it_reads(monkeypatch):
+    """Prod parse issues 2026-11-07: 400-page manuals (York, Evapco) ran past one 240 s limit for any PDF, although
+    nothing was wrong with them. The reader counts the pages it will read and sets its own limit: the floor, or so many
+    seconds a page when that is more (only up to the page limit: a longer PDF is cut there)."""
+    three = make_pdf([["Model RA15AZ"], ["SEER2 15.2"], ["Charge by subcooling"]])
+    assert _main_with_limit(monkeypatch, three, 240, 100) == ([300], "pdfchild.py: time limit 300 s for 3 pages\n")
+    assert _main_with_limit(monkeypatch, three, 240, 5)[0] == [240]
+    eight = make_pdf([[f"Page {n}"] for n in range(8)])
+    assert _main_with_limit(monkeypatch, eight, 240, 100)[0] == [500]  # cut at 5 pages
+
+
+def test_a_reader_stopped_by_its_own_limit_took_too_long_and_the_crawl_waits_for_the_longest_limit(monkeypatch):
+    import signal
+
+    from crawler import textextract
+
+    started = []
+
+    class Child:
+        pid, returncode = 4321, -signal.SIGALRM
+
+        def __init__(self, args, **kwargs):
+            started.append(args)
+
+        def communicate(self, data=None, timeout=None):
+            started.append(timeout)
+            return b"", b"pdfchild.py: time limit 300 s for 60 pages\n"
+
+    monkeypatch.setattr(textextract.subprocess, "Popen", Child)
+    with pytest.raises(textextract.ExtractError) as caught:
+        textextract.extract_pdf(make_pdf([["Model RA15AZ"]]))
+
+    assert str(caught.value) == "the PDF took too long to read"
+    assert caught.value.detail == "pdfchild.py: time limit 300 s for 60 pages"
+    floor, per_page = textextract.PDF_TIMEOUT_SECONDS, textextract.PDF_SECONDS_PER_PAGE
+    assert started[0][-4:] == [str(textextract.PDF_MAX_PAGES), "layout", str(floor), str(per_page)]
+    assert started[1] == max(floor, per_page * textextract.PDF_MAX_PAGES) + textextract.CHILD_START_SECONDS
+
+
 def test_a_page_the_pdf_library_cannot_read_is_read_plainly_and_the_rest_of_the_pdf_is_kept(monkeypatch):
     """Prod parse issues 101-105, 2026-11-05: pdfminer failed on one page of a Carrier data sheet and the whole PDF was
     lost. That page is read by pdfium instead (its lines, no tables)."""
@@ -198,6 +324,8 @@ def test_a_page_the_pdf_library_cannot_read_is_read_plainly_and_the_rest_of_the_
     monkeypatch.setattr(pdfchild, "_clip_aware", lambda: None)
     monkeypatch.setattr(pdfchild, "_stable_ids", lambda: (lambda: None))
     monkeypatch.setattr(pdfchild, "_capped_grouping", lambda: None)  # main() would hook pdfminer for every later test
+    monkeypatch.setattr(pdfchild, "_fast_tables", lambda: None)  # and pdfplumber's table steps
+    monkeypatch.setattr(pdfchild, "_fast_objects", lambda: None)  # and its object dicts
     monkeypatch.setattr(sys, "argv", ["pdfchild", "5", "layout"])
     pdf = make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2"], ["Refrigerant charging", "Charge by subcooling"]])
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(pdf)))

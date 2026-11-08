@@ -13,11 +13,15 @@ import subprocess
 import sys
 
 DPI = 300
+MAX_PIXELS = 17_000_000  # a big sheet is drawn smaller: a 42 x 30 inch as-built at 300 dpi is 114 million pixels and
+# Tesseract ran past its limit; its notes read in 3 s at 100 dpi (2026-11-08). Letter, A3 and 11 x 17 stay near 300 dpi
 MIN_CONFIDENCE = 40
 
 
 def read_page(page):
-    image = page.render(scale=DPI / 72, grayscale=True).to_pil()
+    width, height = page.get_size()
+    scale = min(DPI / 72, (MAX_PIXELS / (width * height)) ** 0.5)
+    image = page.render(scale=scale, grayscale=True).to_pil()
     png = io.BytesIO()
     image.save(png, "PNG")
     out = subprocess.run(["tesseract", "stdin", "stdout", "-l", "eng", "--psm", "3", "tsv"], input=png.getvalue(),
@@ -38,9 +42,9 @@ def read_page(page):
     result = []
     for key in sorted(lines):  # Tesseract's reading order: a column is read to its end before the next one
         words = sorted(lines[key])
-        height = statistics.median(w[2] for w in words) * 72 / DPI
-        result.append({"text": " ".join(w[3] for w in words), "size": round(height, 1),
-                       "top": round(min(w[1] for w in words) * 72 / DPI, 1),
+        line_height = statistics.median(w[2] for w in words) / scale
+        result.append({"text": " ".join(w[3] for w in words), "size": round(line_height, 1),
+                       "top": round(min(w[1] for w in words) / scale, 1),
                        "confidence": round(statistics.mean(w[4] for w in words))})
     return result
 
