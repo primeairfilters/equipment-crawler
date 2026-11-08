@@ -1,25 +1,14 @@
 # CLAUDE.md
 
-## Mental notes
+## The crawler is always a work in progress — make it faster
 
-`mental_notes.md` in the repo root is the user's running list of bugs and things for them to address later.
+**The crawler is never finished, and speed is the most important thing about it.** Every time anything in the crawler
+is modified, the goal is to leave it faster than it was.
 
-- Whenever you come across a bug, or something the user needs to deal with later, add a note right away (not
-  batched at the end of the work).
-- Format of each entry: the date and time first (`## YYYY-MM-DD HH:MM`), then the description, then a separator line
-  `---`, with a blank line between parts:
-
-  ```
-  2026-10-28 10:32
-  What is wrong or what needs deciding, with enough detail (files, ids, numbers) to act on it later.
-
-  ---
-  ```
-
-- One entry per issue. Read the file first so an issue is not logged twice.
-- When an item is fixed or resolved, remove its entry from the file in the same step.
-
-## Commit messages
-
-The user commits; Claude drafts the message. Keep it short: one full sentence that says what changed (no body or
-bullet list unless the user asks for one). Keep the Co-Authored-By line.
+- **Every step and every code change is also a speed check.** Whatever you are working on, look for a way to make that
+  work run faster, and do it as part of the change.
+- **Look across the whole crawler, not only the code in front of you.** The faster route may be in another part:
+  fetching, reading PDFs, tagging, sections and embedding, the database, the nightly run.
+- **A speed-up outside the task you were given is not made.** Write it down instead, in the HVACApp repo's mental
+  notes (`~/Documents/repos/HVACApp/mental_notes.md`): what is slow, where (file and line), the idea to speed it up,
+  and what you did not check. Then say in one line that you added it.
