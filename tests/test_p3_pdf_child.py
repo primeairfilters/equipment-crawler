@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from p3support import make_pdf
+from p3support import locked_pdf, make_pdf
 
 SECRETS = {"EQ_RUNTIME_PASSWORD": "runtime-pass-should-not-leak", "EQ_MIGRATE_PASSWORD": "migrate-pass-should-not-leak",
            "ANTHROPIC_API_KEY_CRAWLER": "sk-ant-should-not-leak"}
@@ -136,6 +136,15 @@ def test_words_set_apart_by_a_gap_of_15_hundredths_of_the_font_are_read_as_words
     from crawler.textextract import extract_pdf
     text = extract_pdf(_kerned_pdf(WORDS, gap=150)).pages[0]
     assert "The heat exchanger has a small amount of combustion chamber insulation" in text
+
+
+def test_a_pdf_that_needs_a_password_to_open_says_so():
+    # 2026-11-08: 21 ClimateMaster PDFs need an open password (their own site serves them so); "could not read the
+    # PDF" with a PDFium traceback read as a reader bug to fix
+    from crawler.textextract import NEEDS_PASSWORD, ExtractError, extract_pdf
+    with pytest.raises(ExtractError) as caught:
+        extract_pdf(locked_pdf())
+    assert str(caught.value) == NEEDS_PASSWORD == "the PDF needs a password to open"
 
 
 def test_letters_of_one_word_are_never_split():

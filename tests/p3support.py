@@ -172,3 +172,21 @@ def make_pdf(pages, drawings=None):
         out += f"{offsets[num]:010d} 00000 n \n".encode()
     out += f"trailer\n<< /Size {total} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
     return bytes(out)
+
+
+def locked_pdf():
+    """A PDF that needs a password to open (ClimateMaster's files, parse issues 351-372, 2026-11-08): make_pdf with an
+    update that adds a Standard (40-bit) encryption entry whose user-password check fails for the empty password, as
+    a file locked with a real password does. PDFium then says "Incorrect password"."""
+    body = bytearray(make_pdf([["Locked " + uuid.uuid4().hex]]))
+    prev = int(body.rstrip().split(b"startxref")[-1].split(b"%%EOF")[0])
+    num = 6
+    at = len(body)
+    body += (f"{num} 0 obj\n<< /Filter /Standard /V 1 /R 2 /Length 40 /O <{'00' * 32}> /U <{'11' * 32}> /P -3904 >>"
+             f"\nendobj\n").encode()
+    xref = len(body)
+    ident = uuid.uuid4().hex
+    body += f"xref\n{num} 1\n{at:010d} 00000 n \n".encode()
+    body += (f"trailer\n<< /Size {num + 1} /Root 1 0 R /Prev {prev} /Encrypt {num} 0 R /ID [<{ident}> <{ident}>] >>\n"
+             f"startxref\n{xref}\n%%EOF\n").encode()
+    return bytes(body)

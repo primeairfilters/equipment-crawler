@@ -21,6 +21,7 @@ PDF_SECONDS_PER_PAGE = 5  # 2026-11-08: the crawl read's limit grows with its pa
 CHILD_START_SECONDS = 30  # the reader's own limit starts once it has opened the PDF; the parent waits this much longer
 LAYOUT_TIMEOUT_SECONDS = 180  # the floor; kb.read_original allows more per page
 PDF_MEMORY_BYTES = 1024 ** 3
+NEEDS_PASSWORD = "the PDF needs a password to open"  # its parse issue is 'needs_password', not 'open' (issues.record)
 PDF_MAX_OUTPUT_BYTES = 20 * 1024 * 1024
 DRAWN_TEXT_SHARE = 0.2  # this share of a PDF's text lines drawn as shapes: its text layer is fragments, treat as a scan
 DRAWN_TEXT_MIN_LINES = 5
@@ -390,6 +391,8 @@ def _run_child(data, args, timeout, memory, child="pdfchild.py"):
         raise ExtractError("the PDF took too long to read", err.decode("utf-8", "replace").strip()[-300:] or None)
     if proc.returncode != 0:
         tail = err.decode("utf-8", "replace").strip()[-1500:] if err else ""
+        if "Incorrect password" in tail:  # PDFium: the maker locked it with an open password; no fix can read it
+            raise ExtractError(NEEDS_PASSWORD, f"{child.name} exit {proc.returncode}: {tail[-300:]}")
         raise ExtractError("could not read the PDF", f"{child.name} exit {proc.returncode}: {tail}" if tail
                            else f"{child.name} exit {proc.returncode} (killed: memory limit or a crash)")
     if len(out) > PDF_MAX_OUTPUT_BYTES:

@@ -11,7 +11,7 @@ import psycopg
 import pytest
 
 from fakeai import FakeAI
-from p3support import make_page, make_pdf, new_brand, q, settle
+from p3support import locked_pdf, make_page, make_pdf, new_brand, q, settle
 from test_admin_control import admin_conn  # noqa: F401  (a fixture)
 from test_p11b_tagging import tags
 
@@ -66,6 +66,19 @@ def test_an_unreadable_pdf_is_recorded_with_the_readers_own_message(runtime_conn
     assert (state, component, seen, times, linked) == ("open", "reader", reader_version(), 1, document_id)
     assert detail["error"] == "could not read the PDF" and "pdfchild.py exit" in detail["reader said"]
     assert detail["bytes"] == len(body)
+
+
+def test_a_pdf_that_needs_a_password_is_set_apart_off_the_fix_list_and_never_retried(runtime_conn, monkeypatch):
+    # 2026-11-08 (user): no code change can open it, so it gets its own state, "needs a password"
+    from crawler.issues import report, retry
+    body = locked_pdf()
+    stored_doc(runtime_conn, body)
+    state, _, detail, _, times, _, _ = issue(runtime_conn, body, "unreadable")
+    assert (state, detail["error"], times) == ("needs_password", "the PDF needs a password to open", 1)
+    assert hashlib.sha256(body).hexdigest() not in report(runtime_conn)
+    new_reader(monkeypatch)
+    retry(runtime_conn)
+    assert issue(runtime_conn, body, "unreadable")[0:5:4] == ("needs_password", 1)
 
 
 def test_a_pdf_cut_at_the_page_limit_is_recorded(runtime_conn, short_reader):

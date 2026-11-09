@@ -13,7 +13,8 @@ Each night (`auto`): retry, then scan, then the Markdown report.
 - scan: the stored-state checks, and the document link for problems recorded before their document existed.
 - report: every open problem as one Markdown fix list (control.issue_report), the same as `./crawl issues`. Also
   rewritten after each brand's turn when a problem turned up since (report_if_stale), so it is never a day behind.
-A 'wont_fix' problem (set on the admin page) is never retried. Nothing here deletes; callers commit.
+A 'wont_fix' problem (set on the admin page) is never retried, nor is a 'needs_password' one (a PDF locked with an open
+password, set by record). Nothing here deletes; callers commit.
 """
 import json
 import re
@@ -74,16 +75,19 @@ def version(component):
 
 
 def record(conn, content_sha, kind, detail, document_id=None):
-    """Note a problem (or see it again). A fixed problem seen again is open again."""
+    """Note a problem (or see it again). A fixed problem seen again is open again. A PDF locked with a password is
+    'needs_password' (user, 2026-11-08): no code change can read it, so it is off the fix list and never retried."""
+    from crawler.textextract import NEEDS_PASSWORD
     component = KINDS[kind][0]
     current = version(component)
-    _rows(conn, "INSERT INTO parse_issues (content_sha, document_id, kind, component, detail, first_version, seen_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (content_sha, kind) DO UPDATE SET "
+    state = "needs_password" if kind == "unreadable" and (detail or {}).get("error") == NEEDS_PASSWORD else "open"
+    _rows(conn, "INSERT INTO parse_issues (content_sha, document_id, kind, component, detail, first_version, seen_version, "
+                "state) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (content_sha, kind) DO UPDATE SET "
                 "detail = EXCLUDED.detail, seen_version = EXCLUDED.seen_version, times_seen = parse_issues.times_seen + 1, "
                 "last_seen_at = (now() AT TIME ZONE 'UTC'), document_id = COALESCE(EXCLUDED.document_id, "
                 "parse_issues.document_id), state = CASE WHEN parse_issues.state = 'wont_fix' THEN 'wont_fix' "
-                "ELSE 'open' END, fixed_version = NULL, fixed_at = NULL",
-          (content_sha, document_id, kind, component, json.dumps(detail, default=str), current, current))
+                "ELSE EXCLUDED.state END, fixed_version = NULL, fixed_at = NULL",
+          (content_sha, document_id, kind, component, json.dumps(detail, default=str), current, current, state))
 
 
 def garbled_pages(texts):
