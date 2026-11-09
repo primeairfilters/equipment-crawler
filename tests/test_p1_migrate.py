@@ -129,6 +129,14 @@ def test_key_columns_and_indexes_exist():
     assert any("sections" in d and "WHERE is_live" in d for d in defs), defs
 
 
+def test_ai_calls_are_found_by_brand_and_month():
+    # 2026-11-08: the admin page's Brands tab took about 10 s; brand_status summed each brand's spend this month by
+    # reading every AI call of the month once per brand (prod: 1.75 s for 357 brands over 21,543 calls)
+    migrate_ok()
+    defs = [r[0] for r in rows("SELECT indexdef FROM pg_indexes WHERE schemaname = 'crawl' AND tablename = 'ai_calls'")]
+    assert any("(brand_id, created_at)" in d for d in defs), defs
+
+
 def test_no_cascade_or_set_null_foreign_keys():
     migrate_ok()
     assert EXPECTED_TABLES <= table_names()  # the schema is there, so an empty result below means something
