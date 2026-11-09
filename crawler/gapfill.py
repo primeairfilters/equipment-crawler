@@ -22,7 +22,7 @@ MAX_SEARCHES_PER_MONTH = 200
 MAX_TOKENS = 4000
 ASSUMED_INPUT_TOKENS = 60_000
 MISS_BACKOFF = timedelta(days=180)
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 
 GAP_SYSTEM = (
     "You look for official documents (spec sheets, installation manuals, data sheets) for one equipment model family "

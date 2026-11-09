@@ -14,7 +14,7 @@ MAX_USES = 8
 MAX_TOKENS = 8000
 ASSUMED_INPUT_TOKENS = 150_000  # worst case for the cap: search results are read as input, over the 100k price step
 REDO_AFTER = timedelta(days=180)
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 MAX_URL_LENGTH = 2048
 
 DISCOVER_SYSTEM = (

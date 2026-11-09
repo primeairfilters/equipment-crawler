@@ -25,7 +25,7 @@ from crawler.hosts import is_refused_host, normalize_host
 TRIAL_SIZE = 5
 TRIAL_PASS = 3
 MAX_TOKENS = 400
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 BLOCKLIST = (  # never a manufacturer's document host
     "facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "youtu.be", "pinterest.com",
     "tiktok.com", "reddit.com", "google.com", "googleusercontent.com", "googleapis.com", "doubleclick.net",

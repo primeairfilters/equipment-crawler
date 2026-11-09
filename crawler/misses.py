@@ -26,7 +26,7 @@ CANDIDATES = 20
 REPEAT_WINDOW = timedelta(days=30)
 MAX_TOKENS = 300
 SECTION_CHARS = 1200
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 
 MISS_SYSTEM = (
     "You check whether a service technician's question is answered by any of the numbered sections from equipment "

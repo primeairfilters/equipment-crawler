@@ -14,7 +14,7 @@ from crawler.rules import is_valid_keyword
 
 MAX_TOKENS = 1500
 MAX_LINKS = 60  # per call; a page with more unsure links is asked in several calls
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 
 LINK_SYSTEM = (
     "You help a crawler that collects equipment documentation for service technicians of every trade (HVAC, plumbing, "

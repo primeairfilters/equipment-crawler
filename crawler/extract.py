@@ -25,7 +25,7 @@ PROMPT_TOKEN_LIMIT = 100_000
 SPLIT_TARGET_TOKENS = 95_000
 DEFAULT_MAX_TOKENS = 16000  # 2026-11-08: was 4000; Evapco spec sheets and a coil spreadsheet list hundreds of models
 # and their answers were cut there (prod: 12 of 9,136 calls). Paid only as used; the reserve against the cap grows a little
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 RETRY_AFTER = timedelta(days=1)
 
 DOC_TYPES = ["spec_sheet", "install_manual", "service_manual", "parts_list", "warranty", "brochure", "other",

@@ -25,7 +25,7 @@ TABLE = "section_vectors_te3s_1536"
 MAX_INPUTS_PER_REQUEST = 100
 MAX_TOKENS_PER_REQUEST = 60_000
 MAX_INPUT_TOKENS = 8_000  # the model reads at most 8,192 tokens an input; the estimate below is on the high side
-DEFAULT_CAP_USD = "25"
+DEFAULT_CAP_USD = "50"
 
 
 class EmbedError(Exception):
