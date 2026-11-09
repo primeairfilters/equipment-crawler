@@ -48,7 +48,8 @@ def find_tables(page):
 
 
 GLUED_RUN = 20  # letters in a row: longer is words run together
-SPACING_RATIO = 0.15  # word gap as a share of the font size, for a page whose words come out glued
+SPACING_RATIO = 0.1  # word gap as a share of the font size, for a page whose words come out glued (2026-11-08: was
+# 0.15, exactly the gap of Munters' manuals, 1.79 points at 11.96-point type; their letters sit at most 0.44 apart)
 
 
 def _glued(text):

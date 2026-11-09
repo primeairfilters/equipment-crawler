@@ -130,6 +130,14 @@ def test_words_set_apart_by_kerning_are_read_as_words():
     assert "The heat exchanger has a small amount of combustion chamber insulation" in text
 
 
+def test_words_set_apart_by_a_gap_of_15_hundredths_of_the_font_are_read_as_words():
+    # parse issue garbled_text 239, 240 (2026-11-08): Munters' MG50/MG90 and IceDry 30 manuals set words 1.79 points
+    # apart at 11.96-point type, exactly the old SPACING_RATIO (0.15), so even the re-read glued them
+    from crawler.textextract import extract_pdf
+    text = extract_pdf(_kerned_pdf(WORDS, gap=150)).pages[0]
+    assert "The heat exchanger has a small amount of combustion chamber insulation" in text
+
+
 def test_letters_of_one_word_are_never_split():
     from crawler.textextract import extract_pdf
     text = extract_pdf(make_pdf([["Installation instructions for the condensing boiler"] * 5])).pages[0]
