@@ -9,14 +9,26 @@
 -- (integer or NULL), language (a section's own language, or NULL for any), depth (rows per way), top (rows
 -- returned), max_distance, equipment (text[]: the equipment types the question names, from EQUIPMENT_WORDS in
 -- crawler/search.py; empty for none) and boost (a section of one of those types has its merged score times this).
-WITH meaning AS (
+WITH pool AS MATERIALIZED (
+  -- inside some manuals (a model's, a brand's), every one of their sections' distances is measured: the HNSW index
+  -- walks until DEPTH rows pass the filter, 8.3 s inside Rheem's 222 manuals on prod, and still missed the nearest
+  -- (0.530 against 0.512); measuring all 6,391 took 0.31 s (2026-11-10). Materialized, so the index is never used here
   SELECT v.section_id, v.embedding <=> %(vector)s::halfvec AS distance
-  FROM kb.section_vectors_te3s_1536 v JOIN kb.sections s ON s.id = v.section_id
-  WHERE v.is_live AND s.is_live
-    AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
+  FROM kb.sections s JOIN kb.section_vectors_te3s_1536 v ON v.section_id = s.id
+  WHERE %(documents)s::bigint[] IS NOT NULL AND s.document_id = ANY (%(documents)s::bigint[])
+    AND v.is_live AND s.is_live
     AND (%(manufacturer)s::integer IS NULL OR v.manufacturer_id = %(manufacturer)s::integer)
     AND (%(language)s::text IS NULL OR v.language = %(language)s::text)
-  ORDER BY distance LIMIT %(depth)s
+), meaning AS (
+  -- the whole library: the HNSW index
+  (SELECT v.section_id, v.embedding <=> %(vector)s::halfvec AS distance
+   FROM kb.section_vectors_te3s_1536 v JOIN kb.sections s ON s.id = v.section_id
+   WHERE %(documents)s::bigint[] IS NULL AND v.is_live AND s.is_live
+     AND (%(manufacturer)s::integer IS NULL OR v.manufacturer_id = %(manufacturer)s::integer)
+     AND (%(language)s::text IS NULL OR v.language = %(language)s::text)
+   ORDER BY distance LIMIT %(depth)s)
+  UNION ALL
+  (SELECT section_id, distance FROM pool ORDER BY distance LIMIT %(depth)s)
 ), meaning_ranked AS (
   SELECT section_id, distance, row_number() OVER (ORDER BY distance, section_id) AS r
   FROM meaning WHERE distance < %(max_distance)s

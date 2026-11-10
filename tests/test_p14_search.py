@@ -194,6 +194,23 @@ def test_the_search_sql_lives_in_one_file_breeze_can_copy():
     assert crawler.search.SEARCH_SQL == sql
 
 
+def meaning_plan(conn, documents):
+    from crawler.search import DEPTH, SEARCH_SQL, _rows, _vector_literal
+    _rows(conn, "SET LOCAL enable_seqscan = off")  # the test library is small enough to scan; ask for the indexes
+    return "\n".join(r[0] for r in _rows(conn, "EXPLAIN " + SEARCH_SQL, {
+        "question": "breaker size", "vector": _vector_literal([0.01] * 1536), "codes": [], "documents": documents,
+        "manufacturer": None, "language": "en", "depth": DEPTH, "top": 8, "max_distance": 0.8, "equipment": [],
+        "boost": 1.5}))
+
+
+def test_a_search_inside_some_manuals_measures_every_distance_instead_of_walking_the_vector_index(runtime_conn):
+    """The HNSW index walks until it finds DEPTH rows that pass the filter: inside Rheem's 222 manuals that was 8.3 of
+    8.8 s on prod, and it still missed the nearest sections (0.530 against 0.512). Measuring all 6,391 directly took
+    0.31 s (2026-11-10). The whole library keeps the index."""
+    assert "section_vectors_te3s_1536_hnsw" not in meaning_plan(runtime_conn, [1, 2, 3])
+    assert "section_vectors_te3s_1536_hnsw" in meaning_plan(runtime_conn, None)
+
+
 def test_the_words_way_finds_heading_words_through_the_heading_index(runtime_conn):
     """Checking each matched section's tsv_weighted for a heading word unpacked every one of them: 9.4 of 10 s on prod
     (245k sections, 2026-11-10). Heading words have their own index (migration 0037); the search's expression must
