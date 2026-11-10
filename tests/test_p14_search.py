@@ -194,6 +194,20 @@ def test_the_search_sql_lives_in_one_file_breeze_can_copy():
     assert crawler.search.SEARCH_SQL == sql
 
 
+def test_the_words_way_finds_heading_words_through_the_heading_index(runtime_conn):
+    """Checking each matched section's tsv_weighted for a heading word unpacked every one of them: 9.4 of 10 s on prod
+    (245k sections, 2026-11-10). Heading words have their own index (migration 0037); the search's expression must
+    match it exactly or the index is silently never used, so the expression is taken from search.sql itself."""
+    import re
+    from crawler.search import SEARCH_SQL, _rows
+    found = re.findall(r"JOIN kb\.sections s ON (to_tsvector\([^)]*heading_path\)) @@ l\.query", SEARCH_SQL)
+    assert len(found) == 1, found
+    _rows(runtime_conn, "SET LOCAL enable_seqscan = off")  # the test library is small enough to scan
+    plan = "\n".join(r[0] for r in _rows(runtime_conn, f"EXPLAIN SELECT s.id FROM kb.sections s "
+                                                       f"WHERE s.is_live AND {found[0]} @@ 'flame'::tsquery"))
+    assert "sections_live_heading_tsv" in plan, plan
+
+
 # ---------------------------------------------------------------- eval
 
 def test_eval_scores_how_often_the_expected_page_is_in_the_top_five(runtime_conn, library, tmp_path):

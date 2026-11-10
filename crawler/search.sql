@@ -23,32 +23,39 @@ WITH meaning AS (
 ), lexemes AS MATERIALIZED (
   -- each word of the question, weighed by how rare it is among live sections, counting its manual's title (IDF):
   -- "thermistor" counts, "air" barely. Counted ahead in kb.word_rarity (migration 0036); '' is a word no section has
-  SELECT l.query, l.heading, COALESCE(r.idf, u.idf) AS idf
-  FROM (SELECT lexeme, quote_literal(lexeme)::tsquery AS query, (quote_literal(lexeme) || ':A')::tsquery AS heading
+  SELECT l.query, COALESCE(r.idf, u.idf) AS idf
+  FROM (SELECT lexeme, quote_literal(lexeme)::tsquery AS query
         FROM unnest(tsvector_to_array(to_tsvector('english', %(question)s))) AS lexeme) l
   JOIN kb.word_rarity u ON u.lexeme = ''
   LEFT JOIN kb.word_rarity r ON r.lexeme = l.lexeme COLLATE "C"
-), candidates AS (
-  -- the sections that can score: one of the question's words in their text, found through the word index
-  -- (sections_live_tsv_weighted), or in their manual's title. Scoring every live section was most of a search's
-  -- time (2026-11-10)
-  SELECT s.id FROM lexemes l JOIN kb.sections s ON s.tsv_weighted @@ l.query WHERE s.is_live
-  UNION
-  SELECT s.id FROM lexemes l JOIN kb.documents d ON d.title_tsv @@ l.query
-  JOIN kb.sections s ON s.document_id = d.id WHERE s.is_live
-), words AS (
+), word_hits AS (
   -- a word counts double in the heading path, once in the body, and half again in the manual's title (the product;
-  -- full credit spread over every section of a manual and let a brochure titled "Mini-Split" beat the service manual)
-  SELECT s.id AS section_id, row_number() OVER (ORDER BY x.score DESC, s.id) AS r
-  FROM candidates c JOIN kb.sections s ON s.id = c.id JOIN kb.documents d ON d.id = s.document_id
-  CROSS JOIN LATERAL (SELECT SUM(l.idf * ((CASE WHEN s.tsv_weighted @@ l.heading THEN 2
-                                               WHEN s.tsv_weighted @@ l.query THEN 1 ELSE 0 END)
-                                         + (CASE WHEN d.title_tsv @@ l.query THEN 0.5 ELSE 0 END))) AS score
-                      FROM lexemes l) x
-  WHERE s.is_live AND x.score > 0
+  -- full credit spread over every section of a manual and let a brochure titled "Mini-Split" beat the service manual).
+  -- Each share comes straight from an index, never by unpacking a section's words: once for the word anywhere in
+  -- the section (sections_live_tsv_weighted), once more in its heading (sections_live_heading_tsv, migration 0037:
+  -- keep the expression exactly as the index has it) and half again in its manual's title. Unpacking every matched
+  -- section for the heading was 9.4 of 10 s on prod (245k sections, 2026-11-10)
+  SELECT s.id AS section_id, l.idf AS part FROM lexemes l JOIN kb.sections s ON s.tsv_weighted @@ l.query
+  WHERE s.is_live
     AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
     AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)
     AND (%(language)s::text IS NULL OR s.language = %(language)s::text)
+  UNION ALL
+  SELECT s.id, l.idf FROM lexemes l JOIN kb.sections s ON to_tsvector('english'::regconfig, s.heading_path) @@ l.query
+  WHERE s.is_live
+    AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
+    AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)
+    AND (%(language)s::text IS NULL OR s.language = %(language)s::text)
+  UNION ALL
+  SELECT s.id, l.idf * 0.5 FROM lexemes l JOIN kb.documents d ON d.title_tsv @@ l.query
+  JOIN kb.sections s ON s.document_id = d.id
+  WHERE s.is_live
+    AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
+    AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)
+    AND (%(language)s::text IS NULL OR s.language = %(language)s::text)
+), words AS (
+  SELECT section_id, row_number() OVER (ORDER BY SUM(part) DESC, section_id) AS r
+  FROM word_hits GROUP BY section_id HAVING SUM(part) > 0
   ORDER BY r LIMIT %(depth)s
 ), codes AS (
   SELECT section_id, row_number() OVER (ORDER BY matched DESC, section_id) AS r FROM (
