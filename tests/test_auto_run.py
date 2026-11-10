@@ -125,3 +125,48 @@ def test_the_auto_command_runs_once_and_prints_the_report(runtime_conn, monkeypa
     assert code == 0, err
     assert "Crawler run" in out and "Needs you:" in out
     assert q(runtime_conn, "SELECT state FROM runs ORDER BY id DESC LIMIT 1") == (("done",),)
+
+
+
+def _waiting_link_site(world):
+    # The start page is visited every run, so the waiting link sits one page deeper, on a page that waits 30 days.
+    start(world)
+    serve(world, "/start", "/product/ra15az")
+    serve(world, "/product/ra15az", ("/about", "About us"))  # a link the rules are unsure about: the AI link check
+    serve(world, "/about")
+
+
+def _fetch_state(world, path):
+    return q(world.conn, "SELECT fetch_state FROM pages WHERE url = %s", (world.url("ruud.test", path),))[0][0]
+
+
+def _hits(world, path):
+    return [h for h in world.site.page_hits() if h["path"] == path]
+
+
+def test_links_skipped_at_the_cap_are_asked_on_the_next_run_with_money_not_30_days_later(world):
+    # user, 2026-11-10: does a link left waiting for the AI link check (the monthly cap was reached) wait for its page's
+    # 30-day recheck? No: each run walks the pages it knows, fetched or not, and asks again about every waiting link.
+    _waiting_link_site(world)
+    auto(world, link_checker=Checker(lambda url, text: None))  # what the link check answers at the monthly cap
+    assert _fetch_state(world, "/about") == "ask_ai"
+
+    world.clock.advance(24 * 3600)  # the next night, not 30 days later
+    checker = Checker()
+    n = len(world.site.page_hits())
+    auto(world, link_checker=checker)
+    assert [h["path"] for h in world.site.page_hits()[n:]] == ["/about"]  # its page was not fetched again: not due
+    assert world.url("ruud.test", "/about") in checker.asked()
+    assert _fetch_state(world, "/about") == "fetched"
+
+
+def test_with_the_cap_still_reached_the_page_is_not_visited_early(world, monkeypatch):
+    _waiting_link_site(world)
+    auto(world, link_checker=Checker(lambda url, text: None))
+    before = len(_hits(world, "/product/ra15az"))
+    monkeypatch.setenv("AI_MONTHLY_CAP_USD", "0.50")
+    q(world.conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('extract', 'claude-haiku-5-5', 1)")
+
+    world.clock.advance(24 * 3600)
+    auto(world, link_checker=Checker(lambda url, text: None))
+    assert len(_hits(world, "/product/ra15az")) == before and _fetch_state(world, "/about") == "ask_ai"
