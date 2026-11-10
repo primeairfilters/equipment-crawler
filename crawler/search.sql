@@ -28,6 +28,11 @@ WITH meaning AS (
         FROM unnest(tsvector_to_array(to_tsvector('english', %(question)s))) AS lexeme) l
   JOIN kb.word_rarity u ON u.lexeme = ''
   LEFT JOIN kb.word_rarity r ON r.lexeme = l.lexeme COLLATE "C"
+), kept AS (
+  -- a word in more than 1 in 20 live sections (idf under ln 20) is left out when the question has a rarer one: it
+  -- barely moves a score and scoring its tens of thousands of sections was most of a common-word question's time
+  -- (1.9 s to 0.12 s on prod; the Ruud eval went from 17 to 20 of 25 in the top five, 2026-11-10)
+  SELECT * FROM lexemes WHERE idf >= ln(20) OR NOT EXISTS (SELECT 1 FROM lexemes WHERE idf >= ln(20))
 ), word_hits AS (
   -- a word counts double in the heading path, once in the body, and half again in the manual's title (the product;
   -- full credit spread over every section of a manual and let a brochure titled "Mini-Split" beat the service manual).
@@ -35,19 +40,19 @@ WITH meaning AS (
   -- the section (sections_live_tsv_weighted), once more in its heading (sections_live_heading_tsv, migration 0037:
   -- keep the expression exactly as the index has it) and half again in its manual's title. Unpacking every matched
   -- section for the heading was 9.4 of 10 s on prod (245k sections, 2026-11-10)
-  SELECT s.id AS section_id, l.idf AS part FROM lexemes l JOIN kb.sections s ON s.tsv_weighted @@ l.query
+  SELECT s.id AS section_id, l.idf AS part FROM kept l JOIN kb.sections s ON s.tsv_weighted @@ l.query
   WHERE s.is_live
     AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
     AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)
     AND (%(language)s::text IS NULL OR s.language = %(language)s::text)
   UNION ALL
-  SELECT s.id, l.idf FROM lexemes l JOIN kb.sections s ON to_tsvector('english'::regconfig, s.heading_path) @@ l.query
+  SELECT s.id, l.idf FROM kept l JOIN kb.sections s ON to_tsvector('english'::regconfig, s.heading_path) @@ l.query
   WHERE s.is_live
     AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))
     AND (%(manufacturer)s::integer IS NULL OR s.manufacturer_id = %(manufacturer)s::integer)
     AND (%(language)s::text IS NULL OR s.language = %(language)s::text)
   UNION ALL
-  SELECT s.id, l.idf * 0.5 FROM lexemes l JOIN kb.documents d ON d.title_tsv @@ l.query
+  SELECT s.id, l.idf * 0.5 FROM kept l JOIN kb.documents d ON d.title_tsv @@ l.query
   JOIN kb.sections s ON s.document_id = d.id
   WHERE s.is_live
     AND (%(documents)s::bigint[] IS NULL OR s.document_id = ANY (%(documents)s::bigint[]))

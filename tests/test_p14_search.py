@@ -419,6 +419,35 @@ def test_a_section_whose_only_match_is_its_manuals_title_is_still_found_by_words
     assert any(h.document_id == doc and h.text_rank for h in hits)
 
 
+@pytest.fixture
+def common_word(runtime_conn, monkeypatch):
+    """25 manuals, half say "quorvalve" (in more than 5% of sections, yet not in all, where it would weigh nothing);
+    one of those also says "glorfindelwidget"."""
+    rare = None
+    for n in range(25):
+        extra = ("The quorvalve is here." if n % 2 == 0 else "") + (" Check the glorfindelwidget." if n == 0 else "")
+        doc, _ = manual(runtime_conn, monkeypatch, topic(f"Part {n}", f"part{n}x", extra), brand_name="Commontest")
+        rare = rare or doc
+    return rare
+
+
+def test_a_word_in_more_than_5_percent_of_sections_is_skipped_when_the_question_has_a_rarer_one(runtime_conn,
+                                                                                               common_word):
+    # skipping them cut a common-word question from 1.9 s to 0.12 s on prod (2026-11-10); the Ruud eval went from
+    # 17 to 20 of 25 in the top five on the Mac's library
+    from crawler.search import search
+    question = "quorvalve glorfindelwidget"
+    hits = search(runtime_conn, question, BagEmbedder().embed([question])[0][0])
+    assert [h.document_id for h in hits if h.text_rank] == [common_word]
+
+
+def test_a_question_of_only_common_words_is_still_searched_by_them(runtime_conn, common_word):
+    from crawler.search import search
+    question = "quorvalve"
+    hits = search(runtime_conn, question, BagEmbedder().embed([question])[0][0])
+    assert any(h.text_rank for h in hits)
+
+
 def test_a_product_named_in_the_question_finds_its_manual_through_the_title(runtime_conn, monkeypatch):
     # batch 2: water heater error-code tables beat the mini-split's for "Floating Air mini split error code 9"
     from crawler.embed import embed_pass
