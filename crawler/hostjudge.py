@@ -207,14 +207,15 @@ def trials(conn, brand_id):
 
 
 def evaluate_trials(conn, brand_id):
-    """Confirm or stop each host whose trial PDFs have been fetched and tagged. Returns [(host, state, reason)]."""
+    """Confirm or stop each host whose trial PDFs have been fetched and tagged. Returns [(host, state, reason, ask)]:
+    ask is False when its only trial PDF was tagged not a manual (a parent's legal page PDF, prod 2026-11-10)."""
     out = []
     for decision_id, host, pages in _rows(conn, "SELECT id, host, trial_pages FROM host_decisions WHERE brand_id = %s "
                                                 "AND state = 'trial'", (brand_id,)):
         pages = _topped_up(conn, brand_id, decision_id, host, pages)
         if not pages:  # none of its PDFs can be reached yet: nothing to judge, so it waits rather than stops
             continue
-        equipment = done = 0
+        equipment = done = junk = 0
         for page_id in pages:
             fetch_state, doc_types = _rows(
                 conn, "SELECT p.fetch_state, ARRAY(SELECT d.doc_type FROM document_urls du JOIN documents d "
@@ -224,6 +225,7 @@ def evaluate_trials(conn, brand_id):
                 done += 1
             elif fetch_state == "failed" or any(t == "not_equipment" for t in doc_types):
                 done += 1
+                junk += any(t == "not_equipment" for t in doc_types)
         need = min(TRIAL_PASS, len(pages))
         if pages and equipment >= need:
             reason = f"trial: {equipment} of {len(pages)} PDFs are equipment documents"
@@ -236,5 +238,5 @@ def evaluate_trials(conn, brand_id):
             continue
         _rows(conn, "UPDATE host_decisions SET state = %s, reason = reason || '; ' || %s, "
                     "updated_at = (now() AT TIME ZONE 'UTC') WHERE id = %s", (state, reason, decision_id))
-        out.append((host, state, reason))
+        out.append((host, state, reason, not (len(pages) == 1 and junk == 1)))
     return out

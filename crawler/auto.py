@@ -362,15 +362,15 @@ def _hosts(conn, client, brand_id, name, over_budget, summary):
 
 def _trials(conn, brand_id, name, summary):
     from crawler.hostjudge import evaluate_trials
-    for host, state, reason in evaluate_trials(conn, brand_id):
-        _host_line(summary, name, host, state, reason)
+    for host, state, reason, ask in evaluate_trials(conn, brand_id):
+        _host_line(summary, name, host, state, reason, ask)
 
 
-def _host_line(summary, name, host, state, reason):
+def _host_line(summary, name, host, state, reason, ask=True):
     words = {"own": "approved as its own site", "trial": "approved for a trial (PDFs only)", "confirmed": "confirmed (PDFs only)",
              "stopped": "stopped after its trial", "rejected": "not approved"}[state]
     summary["hosts"].append(f"{name}: {host} {words}: {reason}")
-    if state == "stopped":
+    if state == "stopped" and ask:
         summary["needs_you"].append(f"{name}: {host} was stopped after its trial ({reason}); `./crawl ok {host} "
                                     f"--brand \"{name}\"` approves it anyway")
 

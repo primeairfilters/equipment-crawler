@@ -99,6 +99,18 @@ def test_a_trial_of_junk_stops_the_host_and_the_report_asks_the_user(world):
     assert any("files.test" in line and "stopped" in line for line in second["needs_you"])
 
 
+def test_a_trial_of_one_pdf_that_is_not_a_manual_stops_the_host_without_asking_the_user(world):
+    # Prod 2026-11-10: Arcoaire, Payne, Samsung... each linked one legal PDF on a parent's host; nothing to approve
+    files_site(world, n=1)
+    client = Both(lambda r: tags(doc_type="not_equipment"))
+    auto(world, client)
+    second = auto(world, client)
+    state, _, _, status, _ = decision(world)
+    assert (state, status) == ("stopped", "stopped") and len(fetched(world)) == 1
+    assert any("files.test" in line and "stopped" in line for line in second["hosts"])  # still in the run report
+    assert not any("files.test" in line for line in second["needs_you"])
+
+
 def test_a_no_is_recorded_and_the_host_is_not_asked_about_again(world):
     files_site(world)
     client = Both(lambda r: tags(), host_answer=lambda host: False)
