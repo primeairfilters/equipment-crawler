@@ -71,17 +71,22 @@ def _text(page):
 
 
 def page_text(page):
-    """Text outside ruled tables, then each ruled table as tab-separated rows (empty cells kept)."""
+    """Text outside ruled tables, then each ruled table as tab-separated rows (empty cells kept), then turned text as
+    _rotated_lines reads it: pdfplumber reads text turned a quarter turn backwards (".sedoc lanoitan", parse issue 348)."""
+    turned = _rotated_lines(page)
+    if turned:
+        page = page.filter(lambda o: o.get("object_type") != "char" or o["upright"])
+    tail = "".join("\n" + text for text, _ in turned)
     try:
         tables = find_tables(page)
         if not tables:
-            return _text(page)
+            return _text(page) + tail
         parts = [_text(page.filter(_outside([bbox for bbox, _ in tables])))]
         for _, rows in tables:
             parts.append("\n".join("\t".join((cell or "").replace("\n", " ") for cell in row) for row in rows))
-        return "\n".join(parts)
+        return "\n".join(parts) + tail
     except Exception:
-        return _text(page)
+        return _text(page) + tail
 
 
 def _glyph_run(shapes, gap=10):
@@ -545,6 +550,15 @@ def plain_lines(page):
     return out
 
 
+def overprinted(page):
+    """True when a quarter of a pdfplumber page's letters are copies printed on the same spot (Swegon's CASA Genius
+    diagram prints each up to 19 times, labels over labels, parse issue 681: "TTTTTTTTTTTTTTTTTTTuuu..."). pdfium reads
+    such a page in print order, cleanly; pdfplumber's dedupe_chars took 263 s on its 138,540 letters and still left
+    the stacked labels jumbled. One pass."""
+    spots = {(c["text"], round(c["x0"]), round(c["top"])) for c in page.chars}
+    return (len(page.chars) - len(spots)) * 4 > len(page.chars)
+
+
 def main():
     max_pages = int(sys.argv[1])
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
@@ -572,7 +586,7 @@ def main():
             signal.alarm(limit)
         for number, page in enumerate(pdf.pages[:max_pages]):
             quick = fast[number]
-            if crowded(quick):
+            if crowded(quick) or overprinted(page):
                 items = plain_lines(quick)
                 pages.append("\n".join(i["text"] for i in items)[:MAX_PAGE_CHARS])
                 rows.append((0, len(items)))

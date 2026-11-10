@@ -197,6 +197,23 @@ def test_rotated_labels_far_apart_on_one_line_stay_apart():
     assert all(line in texts for line in real_lines(3))
 
 
+def test_rotated_text_reads_forwards_in_the_plain_text_too():
+    # parse issue 348 (Daikin RXYQ-TATJU wiring notes): the plain text read them backwards, ".sedoc lanoitan"
+    from crawler.textextract import extract_pdf
+    up, down = "Unit shall be grounded in compliance with codes", "Use copper conductors only"
+    text = extract_pdf(make_pdf([real_lines(3)], [[rotated_at(500, 100, up), rotated_at(540, 700, down, up=False)]])).pages[0]
+    assert up in text and down in text
+    assert all(line in text for line in real_lines(3))
+
+
+def test_a_letter_printed_many_times_on_one_spot_is_read_once():
+    # parse issue 681 (Swegon CASA Genius diagram): every letter printed 19 times over read "TTTTTTTTTTTTTTTTTTTuuu..."
+    from crawler.textextract import extract_layout, extract_pdf
+    pdf = make_pdf([real_lines(3)], [[text_at(72, 300, "Tunnus Selitys")] * 19])
+    assert "Tunnus Selitys" in extract_pdf(pdf).pages[0]
+    assert "Tunnus Selitys" in [i["text"] for i in extract_layout(pdf)[0]]
+
+
 def test_a_glyph_with_no_text_is_dropped():
     from crawler.textextract import clean
     assert clean("24(cid:31) (609.6)\n(cid:3)(cid:4)\nService") == "24 (609.6)\nService"

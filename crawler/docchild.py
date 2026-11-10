@@ -119,8 +119,11 @@ def read_pptx(data):
 class _Drawn:
     """A photo standing in for a pdfium page, so ocrchild.read_page reads it exactly as it reads a scanned page."""
 
-    def __init__(self, image):
-        self.image = image
+    def __init__(self, image, dpi):
+        self.image, self.dpi = image, dpi
+
+    def get_size(self):  # in points, as pdfium gives a page's: the photo is drawn as is, at the OCR's DPI
+        return tuple(n * 72 / self.dpi for n in self.image.size)
 
     def render(self, **_):
         return self
@@ -132,12 +135,12 @@ class _Drawn:
 def read_photo(data):
     from PIL import Image, ImageOps
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from ocrchild import read_page
+    from ocrchild import DPI, read_page
     image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("L")
     if max(image.size) > MAX_PHOTO_SIDE:
         image.thumbnail((MAX_PHOTO_SIDE, MAX_PHOTO_SIDE))
     items = [{"kind": "text", "text": line["text"], "size": line["size"], "bold": False, "ocr": True,
-              "confidence": line["confidence"]} for line in read_page(_Drawn(image)) if _clean(line["text"])]
+              "confidence": line["confidence"]} for line in read_page(_Drawn(image, DPI)) if _clean(line["text"])]
     return [items] if items else [], None
 
 
