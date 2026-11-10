@@ -239,6 +239,8 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     # whatever no turn built (uploads, a re-read after a reader change); each stops at the stop time by itself
     built = step("sections", lambda: build_and_publish(conn, after_document=commit))
     summary["sections_built"] += (built or {}).get("built", 0)
+    from crawler.kb import refresh_word_rarity
+    step("word rarity", lambda: refresh_word_rarity(conn))  # after every step above that turns sections on or off
     vectors("embedding")
     if owner_connect is not None:
         summary["pruned"] = step("prune", lambda: _prune(owner_connect))

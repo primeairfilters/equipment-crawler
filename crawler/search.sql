@@ -22,17 +22,25 @@ WITH meaning AS (
   FROM meaning WHERE distance < %(max_distance)s
 ), lexemes AS MATERIALIZED (
   -- each word of the question, weighed by how rare it is among live sections, counting its manual's title (IDF):
-  -- "thermistor" counts, "air" barely
-  SELECT l.query, l.heading, ln((SELECT COUNT(*) FROM kb.sections WHERE is_live)::numeric
-                                / GREATEST((SELECT COUNT(*) FROM kb.sections s JOIN kb.documents d ON d.id = s.document_id
-                                            WHERE s.is_live AND (s.tsv_weighted @@ l.query OR d.title_tsv @@ l.query)), 1)) AS idf
-  FROM (SELECT quote_literal(lexeme)::tsquery AS query, (quote_literal(lexeme) || ':A')::tsquery AS heading
+  -- "thermistor" counts, "air" barely. Counted ahead in kb.word_rarity (migration 0036); '' is a word no section has
+  SELECT l.query, l.heading, COALESCE(r.idf, u.idf) AS idf
+  FROM (SELECT lexeme, quote_literal(lexeme)::tsquery AS query, (quote_literal(lexeme) || ':A')::tsquery AS heading
         FROM unnest(tsvector_to_array(to_tsvector('english', %(question)s))) AS lexeme) l
+  JOIN kb.word_rarity u ON u.lexeme = ''
+  LEFT JOIN kb.word_rarity r ON r.lexeme = l.lexeme COLLATE "C"
+), candidates AS (
+  -- the sections that can score: one of the question's words in their text, found through the word index
+  -- (sections_live_tsv_weighted), or in their manual's title. Scoring every live section was most of a search's
+  -- time (2026-11-10)
+  SELECT s.id FROM lexemes l JOIN kb.sections s ON s.tsv_weighted @@ l.query WHERE s.is_live
+  UNION
+  SELECT s.id FROM lexemes l JOIN kb.documents d ON d.title_tsv @@ l.query
+  JOIN kb.sections s ON s.document_id = d.id WHERE s.is_live
 ), words AS (
   -- a word counts double in the heading path, once in the body, and half again in the manual's title (the product;
   -- full credit spread over every section of a manual and let a brochure titled "Mini-Split" beat the service manual)
   SELECT s.id AS section_id, row_number() OVER (ORDER BY x.score DESC, s.id) AS r
-  FROM kb.sections s JOIN kb.documents d ON d.id = s.document_id
+  FROM candidates c JOIN kb.sections s ON s.id = c.id JOIN kb.documents d ON d.id = s.document_id
   CROSS JOIN LATERAL (SELECT SUM(l.idf * ((CASE WHEN s.tsv_weighted @@ l.heading THEN 2
                                                WHEN s.tsv_weighted @@ l.query THEN 1 ELSE 0 END)
                                          + (CASE WHEN d.title_tsv @@ l.query THEN 0.5 ELSE 0 END))) AS score

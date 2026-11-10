@@ -632,6 +632,9 @@ def main(argv):
                 print("Done: " + ", ".join(f"{n} {k.replace('_', ' ')}" for k, n in summary.items()))
                 if summary["submitted"]:
                     print("Run ./crawl extract again later to collect the answers.")
+            if args.command in ("sections", "hide", "unhide", "tag", "extract"):  # they turn sections on or off
+                from crawler.kb import refresh_word_rarity
+                refresh_word_rarity(conn)
             conn.commit()
         except RefusedHost as exc:
             print(f"Refused: {exc}", file=sys.stderr)

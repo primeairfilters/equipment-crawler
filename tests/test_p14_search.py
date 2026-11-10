@@ -46,6 +46,8 @@ def manual(conn, monkeypatch, pages, brand_name=None, models=(), doc_type="insta
                            "RETURNING id", (mid, key, key))[0][0]
         q(conn, "INSERT INTO document_models (document_id, model_id, model_key, manufacturer_id) VALUES (%s, %s, %s, %s)",
           (doc, model_id, key, mid))
+    from crawler.kb import refresh_word_rarity
+    refresh_word_rarity(conn)  # the search reads word rarity from kb.word_rarity, as the nightly run leaves it
     return doc, name
 
 
@@ -387,7 +389,20 @@ def test_question_words_side_by_side_in_a_section_count_more_than_the_same_words
 def titled(conn, monkeypatch, title, pages, brand_name):
     doc, _ = manual(conn, monkeypatch, pages, brand_name=brand_name)
     q(conn, "UPDATE documents SET title = %s WHERE id = %s", (title, doc))
+    from crawler.kb import refresh_word_rarity
+    refresh_word_rarity(conn)  # a title's words count in word rarity too
     return doc
+
+
+def test_a_section_whose_only_match_is_its_manuals_title_is_still_found_by_words(runtime_conn, monkeypatch):
+    # the words way finds its sections through the word index, plus the sections of manuals whose title matches
+    from crawler.search import search
+    doc = titled(runtime_conn, monkeypatch, "Glorfindelwidget Service Manual",
+                 [[t("Wiring", 14), t(words(300, "wire"))]], "Titleonly")
+    titled(runtime_conn, monkeypatch, "Gas Furnace Installation", [[t("Venting", 14), t(words(300, "vent"))]], "Titleonly")
+    question = "glorfindelwidget"
+    hits = search(runtime_conn, question, BagEmbedder().embed([question])[0][0])
+    assert any(h.document_id == doc and h.text_rank for h in hits)
 
 
 def test_a_product_named_in_the_question_finds_its_manual_through_the_title(runtime_conn, monkeypatch):

@@ -403,6 +403,12 @@ def unhide(conn, target_type, target, *, reason, by_whom):
     return target_id
 
 
+def refresh_word_rarity(conn):
+    """kb.word_rarity (migration 0036) counted again from the live sections. Run after anything that turns sections on
+    or off. CONCURRENTLY, so a Breeze search reads the old counts until the new ones are in, never waits."""
+    _exec(conn, "REFRESH MATERIALIZED VIEW CONCURRENTLY kb.word_rarity")
+
+
 # ---------------------------------------------------------------- tags set by hand
 
 def set_tags(conn, document_id, *, doc_type=None, equipment_type=None, trade=None):
