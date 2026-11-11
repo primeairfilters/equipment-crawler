@@ -18,6 +18,7 @@ password, set by record). Nothing here deletes; callers commit.
 """
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 
 KINDS = {  # kind: (component, what it means, where a fix usually goes)
@@ -104,7 +105,7 @@ def garbled_pages(texts):
                 bad += 1
             elif (run.isupper() and len(run) <= ABBREVIATION) or len(run) <= 3:
                 continue  # CFM, WB; mm, ft, lbs
-            elif _VOWEL.search(run) or len(run) == 1:
+            elif _VOWEL.search(unicodedata.normalize("NFD", run)) or len(run) == 1:  # "Thận": ậ is a with marks (issue 670)
                 good += 1
             else:
                 bad += 1

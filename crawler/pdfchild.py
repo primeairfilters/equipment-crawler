@@ -9,6 +9,7 @@ and lines of real text, so the parent can tell a text layer that holds only frag
 Text outside its clipping path is not read: a viewer never shows it, but pdfminer ignores clips, so a hidden copy
 (seen in a Ruud spec sheet: a table's text clipped away under another table) would mix into what is shown.
 """
+import contextlib
 import io
 import json
 import re
@@ -559,6 +560,15 @@ def overprinted(page):
     return (len(page.chars) - len(spots)) * 4 > len(page.chars)
 
 
+def _overprinted_or_unreadable(page):
+    """overprinted, or True when pdfminer cannot read the page's letters at all (Bullfrog Spas and Crosley manuals,
+    parse issues 717-722: "list index out of range" here lost the whole PDF): pdfium reads such a page."""
+    try:
+        return overprinted(page)
+    except Exception:
+        return True
+
+
 def main():
     max_pages = int(sys.argv[1])
     layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
@@ -574,8 +584,14 @@ def main():
     data = sys.stdin.buffer.read()
     pages, layouts, rows = [], [], []
     fast = pypdfium2.PdfDocument(data)
-    with pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {})) as pdf:
-        total = len(pdf.pages)  # more than max_pages: the document was cut (a parse issue)
+    try:
+        pdf = pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {}))
+    except Exception:
+        # pdfminer cannot open it ("Unexpected EOF", "No /Root object": Daikin submittals, parse issues 379 and 384)
+        # while pdfium reads every page: pdfium reads them all
+        pdf = None
+    with contextlib.nullcontext() if pdf is None else pdf:
+        total = len(pdf.pages) if pdf else len(fast)  # more than max_pages: the document was cut (a parse issue)
         if floor is not None:
             # the limit grows with the pages read (400-page York and Evapco manuals ran past one 240 s limit, parse
             # issues 2026-11-07); SIGALRM's default ends the process even inside pdfium's C code
@@ -584,9 +600,12 @@ def main():
             sys.stderr.write(f"pdfchild.py: time limit {limit} s for {pages_read} pages\n")
             sys.stderr.flush()
             signal.alarm(limit)
-        for number, page in enumerate(pdf.pages[:max_pages]):
-            quick = fast[number]
-            if crowded(quick) or overprinted(page):
+        for number, page in enumerate(pdf.pages[:max_pages] if pdf else [None] * min(total, max_pages)):
+            try:
+                quick = fast[number]
+            except Exception:
+                quick = None  # pdfium cannot load the page (a Bosch IOM's last three, parse issue 349): pdfplumber reads it
+            if quick is not None and (page is None or crowded(quick) or _overprinted_or_unreadable(page)):
                 items = plain_lines(quick)
                 pages.append("\n".join(i["text"] for i in items)[:MAX_PAGE_CHARS])
                 rows.append((0, len(items)))
@@ -604,15 +623,17 @@ def main():
             except Exception:
                 # pdfminer cannot read this page at all (parse issues 101-105, 2026-11-05): pdfium reads its lines, so
                 # one bad page no longer loses the whole PDF.
-                items = plain_lines(quick)
+                items = plain_lines(quick) if quick is not None else []  # neither reader can: the page has no text
                 text = "\n".join(i["text"] for i in items)[:MAX_PAGE_CHARS]
                 row = (0, len(items))
-            quick.close()
+            if quick is not None:
+                quick.close()
             pages.append(text)
             rows.append(row)
             if layout:
                 layouts.append(items)
-            page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
+            if page is not None:
+                page.close()  # drop the page's parsed objects: a 37 MB manual peaked at 1.6 GB kept, 0.2 GB closed
             next_page()
     fast.close()
     out = {"pages": pages, "rows": rows, "page_total": total}

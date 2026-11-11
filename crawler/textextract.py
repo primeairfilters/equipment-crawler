@@ -124,7 +124,8 @@ def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS
         layout = raw["layout"]
     except KeyError as exc:
         raise ExtractError("the PDF reader gave an unusable answer") from exc
-    blank = drawn_pages(raw.get("rows"))
+    blank = drawn_pages(raw.get("rows")) | garbled(
+        ["\n".join(i.get("text", "") for i in page if i.get("kind") != "table") for page in layout[:max_pages]])
     pages = []
     for number, page in enumerate(layout[:max_pages]):
         items = []
@@ -241,6 +242,8 @@ def extract_pdf(data, max_pages=PDF_MAX_PAGES, timeout=PDF_TIMEOUT_SECONDS, memo
     raw = _read(data, max_pages, timeout, memory, per_page)
     blank = drawn_pages(raw.get("rows"))
     pages = ["" if n in blank else clean(p) for n, p in enumerate(raw["pages"][:max_pages])]
+    unwords = garbled(pages)
+    pages = ["" if n in unwords else p for n, p in enumerate(pages)]
     left_out = set()
     read = ocr_pages(data, [n for n, text in enumerate(pages)
                             if not text or caption_only(text) or unreadable_font(raw["pages"][n])], memory,
@@ -329,6 +332,14 @@ def drawn_pages(rows):
     if not drawn_text(rows):
         return set()
     return {n for n, row in enumerate(rows or []) if int(row[0] or 0) > 0}
+
+
+def garbled(texts):
+    """Indexes of the pages whose text layer is not words (issues.garbled_pages): a font that maps its letters to the
+    wrong ones ("Tpcqq rfgq `srrml" for "Press this button", Gree's service manual, parse issue 645). Their text is
+    dropped and the page read with OCR."""
+    from crawler.issues import garbled_pages
+    return {number - 1 for number, _, _ in garbled_pages(texts)}
 
 
 def drawn_text(rows):

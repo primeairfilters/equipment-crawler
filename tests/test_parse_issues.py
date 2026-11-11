@@ -122,6 +122,16 @@ def test_garbled_text_is_found_and_real_text_is_not():
     assert [n for n, _, _ in found] == [2] and found[0][1] == 0 and found[0][2].startswith("xqzt brrk")
 
 
+def test_vietnamese_words_are_words():
+    """Daikin BRC1H manual in Vietnamese (parse issue 670): "Thận trọng" counted as letters with no vowel, because the
+    vowel list had no Vietnamese marks (ậ, ọ, ư, ơ)."""
+    from crawler.issues import garbled_pages
+    vietnamese = ("NỘI DUNG Thận trọng khi sử dụng Khởi động ứng dụng Cách sử dụng cơ bản Chế độ cài đặt thủ công "
+                  "Cài đặt trình cài đặt Cài đặt dàn lạnh Tự động làm sạch bộ lọc Ngăn hút tự động ") * 3
+    assert garbled_pages([vietnamese]) == []
+    assert [n for n, _, _ in garbled_pages([vietnamese, GARBLE])] == [2]  # control: garble is still found
+
+
 def test_a_garbled_document_is_recorded_once_per_reader_version(runtime_conn, monkeypatch):
     from crawler.issues import scan
     body = make_pdf([[f"Manual {uuid.uuid4().hex}", GARBLE]])

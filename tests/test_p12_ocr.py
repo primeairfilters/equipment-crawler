@@ -376,6 +376,38 @@ def test_the_section_build_reads_a_page_whose_font_cannot_be_read_with_ocr(monke
     assert asked == [0] and any(i.get("ocr") and "Single Wall" in i["text"] for i in pages[0])
 
 
+# Gree's service manual (parse issue 645): a font whose letters map to the wrong letters, "Press this button" read as
+GREE = "Tpcqq rfgq `srrml rm rspl ml M JIIP dslargml. Wfc slgr _srmk_rga_jjw _bhsqr rckncp_rspc _aampbgle rm rfc qclqcb. " * 4
+REAL = "Press this button to turn on the I FEEL function. The unit adjusts the temperature to the sensed temperature. " * 4
+
+
+def test_a_page_whose_letters_are_not_words_is_read_with_ocr_instead(monkeypatch):
+    import crawler.textextract as t
+    monkeypatch.setattr(t, "_read", lambda *a, **k: {"pages": [GREE, REAL]})
+    asked = []
+    monkeypatch.setattr(t, "_ocr_child", lambda data, indexes, memory: asked.extend(indexes) or
+                        {str(n): [{"text": "SLEEP icon is displayed by pressing the SLEEP button", "confidence": 60}]
+                         for n in indexes})
+    found = t.extract_pdf(b"%PDF")
+    assert asked == [0]  # the page of real words is not read again
+    assert found.pages[0] == "SLEEP icon is displayed by pressing the SLEEP button"  # the garble is gone
+    assert found.pages[1] == REAL.strip() and found.ocr_pages == {0}
+
+
+def test_the_section_build_reads_a_page_whose_letters_are_not_words_with_ocr_instead(monkeypatch):
+    import crawler.textextract as t
+    layout = [[{"kind": "text", "text": GREE, "size": 10}], [{"kind": "text", "text": REAL, "size": 10}]]
+    monkeypatch.setattr(t, "_read", lambda *a, **k: {"layout": layout})
+    asked = []
+    monkeypatch.setattr(t, "_ocr_child", lambda data, indexes, memory: asked.extend(indexes) or
+                        {str(n): [{"text": "SLEEP icon is displayed by pressing the SLEEP button", "confidence": 60}]
+                         for n in indexes})
+    pages = t.extract_layout(b"%PDF")
+    assert asked == [0]
+    assert [i["text"] for i in pages[0]] == ["SLEEP icon is displayed by pressing the SLEEP button"]
+    assert [i["text"] for i in pages[1]] == [REAL.strip()]
+
+
 def test_a_huge_drawing_sheet_is_drawn_for_ocr_at_no_more_than_max_pixels(monkeypatch):
     # 2026-11-08: a 42 x 30 inch as-built sheet at 300 dpi is 114 million pixels; Tesseract ran past the limit. Its
     # notes read in 3 s at 100 dpi

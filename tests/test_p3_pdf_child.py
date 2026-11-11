@@ -405,3 +405,77 @@ def test_a_page_of_few_text_boxes_is_still_grouped_into_reading_order(monkeypatc
 
     assert given == [50]
     assert len(lines) == 50
+
+
+# ---------------------------------------------------------------- one reader failing does not lose the PDF (parse issues 2026-11-11)
+
+TWO_PAGES = [["Install the outdoor unit on a level pad."], ["Check the refrigerant charge after startup."]]
+
+
+def _read_real(monkeypatch, data, layout=False):
+    """pdfchild.main() in-process on a real PDF with the real readers (the pdfminer speed hooks left off)."""
+    from crawler import pdfchild
+    for hook in ("_clip_aware", "_capped_grouping", "_fast_tables", "_fast_objects"):
+        monkeypatch.setattr(pdfchild, hook, lambda: None)
+    monkeypatch.setattr(sys, "argv", ["pdfchild", "5"] + (["layout"] if layout else []))
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(data)))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    pdfchild.main()
+    return json.loads(out.getvalue())
+
+
+def test_a_page_pdfminer_cannot_check_for_stacked_letters_is_read_by_pdfium(monkeypatch):
+    """Bullfrog Spas and Crosley manuals (parse issues 717-722): pdfminer failed on pages 2-6 inside the stacked-letter
+    check, which ran outside the bad-page guard, and the whole PDF was lost."""
+    from pdfplumber.utils.exceptions import PdfminerException
+
+    from crawler import pdfchild
+    checked = []
+
+    def overprinted(page):
+        checked.append(page.page_number)
+        if page.page_number == 2:
+            raise PdfminerException("list index out of range")
+        return False
+    monkeypatch.setattr(pdfchild, "overprinted", overprinted)
+    out = _read_real(monkeypatch, make_pdf(TWO_PAGES))
+    assert checked == [1, 2]  # the check ran on the bad page
+    assert "level pad" in out["pages"][0]
+    assert "refrigerant charge" in out["pages"][1]
+
+
+def test_a_pdf_pdfminer_cannot_open_is_read_whole_by_pdfium(monkeypatch):
+    """Daikin submittals (parse issues 379, 384): pdfplumber said "Unexpected EOF" and "No /Root object" while pdfium
+    read every page."""
+    import pdfplumber
+    from pdfplumber.utils.exceptions import PdfminerException
+    opened = []
+
+    def refuse(*a, **kw):
+        opened.append(1)
+        raise PdfminerException("No /Root object! - Is this really a PDF?")
+    monkeypatch.setattr(pdfplumber, "open", refuse)
+    for layout in (False, True):
+        out = _read_real(monkeypatch, make_pdf(TWO_PAGES), layout)
+        assert "level pad" in out["pages"][0] and "refrigerant charge" in out["pages"][1]
+        assert out["page_total"] == 2
+        if layout:
+            assert [i["text"] for i in out["layout"][1]] == ["Check the refrigerant charge after startup."]
+    assert opened == [1, 1]
+
+
+def test_a_page_pdfium_cannot_load_is_read_by_pdfplumber(monkeypatch):
+    """Bosch IOM (parse issue 349): pdfium failed to load its last three pages and the whole PDF was lost."""
+    import pypdfium2
+
+    real = pypdfium2.PdfDocument.__getitem__
+
+    def get(self, n):
+        if n == 1:
+            raise pypdfium2.PdfiumError("Failed to load page.")
+        return real(self, n)
+    monkeypatch.setattr(pypdfium2.PdfDocument, "__getitem__", get)
+    out = _read_real(monkeypatch, make_pdf(TWO_PAGES))
+    assert "level pad" in out["pages"][0]
+    assert "refrigerant charge" in out["pages"][1]
