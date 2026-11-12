@@ -13,7 +13,7 @@ from pathlib import Path
 
 from selectolax.lexbor import LexborHTMLParser
 
-PDF_MAX_PAGES = 800  # 2026-11-08: was 400, which cut 14 manuals of 405-690 pages; all 21 cut ones read whole in 25-155 s
+PDF_MAX_PAGES = 1000  # 2026-11-12: was 800, which cut an 808-page Delta drive manual (parse issue 544, user); 2026-11-08: was 400, which cut 14 manuals of 405-690 pages; all 21 cut ones read whole in 25-155 s
 # on the Mac with at most 545 MB (user); 2026-11-06: was 300, which cut 17 manuals (user); 2026-10-29: was 200, which cut Ruud docs 799, 800 and 604
 PDF_TIMEOUT_SECONDS = 240  # 2026-11-06: was 180, raised with the 400-page limit (user); big Ruud manuals took 63-109 s to read; 60 s cut them off
 PDF_SECONDS_PER_PAGE = 5  # 2026-11-08: the crawl read's limit grows with its pages, from PDF_TIMEOUT_SECONDS up (a dense
@@ -116,10 +116,11 @@ def _children(node):
         child = child.next
 
 
-def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES):
+def extract_layout(data, max_pages=PDF_MAX_PAGES, timeout=LAYOUT_TIMEOUT_SECONDS, memory=PDF_MEMORY_BYTES, per_page=0):
     """Per page, the text lines with font size and boldness, and the ruled tables, in reading order (for sections).
-    The reader's answer is kept in the library (_kept_layout), so a sectioner change does not read every PDF again."""
-    raw = _read(data, max_pages, timeout, memory)
+    The reader's answer is kept in the library (_kept_layout), so a sectioner change does not read every PDF again.
+    per_page: the reader's limit grows with the pages it finds (_read), for a PDF whose page count is not known."""
+    raw = _read(data, max_pages, timeout, memory, per_page)
     try:
         layout = raw["layout"]
     except KeyError as exc:
@@ -225,12 +226,22 @@ def _read(data, max_pages, timeout, memory, per_page=0):
     per_page: the reader sets its own limit, timeout or per_page seconds a page read when that is more, and the parent
     waits for the longest that can be (PDF_MAX_PAGES pages)."""
     raw = _kept_layout(data, max_pages)
-    if raw is None and per_page:
-        raw = _run_child(data, [str(max_pages), "layout", str(timeout), str(per_page)],
-                         max(timeout, per_page * max_pages) + CHILD_START_SECONDS, memory)
-        _keep_layout(data, max_pages, raw)
-    elif raw is None:
-        raw = _run_child(data, [str(max_pages), "layout"], timeout, memory)
+    if raw is None:
+        args, wait = [str(max_pages), "layout"], timeout
+        if per_page:
+            args, wait = args + [str(timeout), str(per_page)], max(timeout, per_page * max_pages) + CHILD_START_SECONDS
+        try:
+            raw = _run_child(data, args, wait, memory)
+        except ExtractError as exc:
+            if str(exc) == NEEDS_PASSWORD:
+                raise
+            # A big PDF the full reader cannot finish (the 1 GB limit, or out of time) is read again by pdfium alone:
+            # plain lines, no tables, but its text instead of nothing (user, 2026-11-12; parse issues 187, 258, 265,
+            # 504, 835: pdfium read the 119-page Grohe book in 4 s with 275 MB). If that fails too, the first error stands.
+            try:
+                raw = _run_child(data, args + ["pdfium"], wait, memory)
+            except ExtractError:
+                raise exc from None
         _keep_layout(data, max_pages, raw)
     return raw
 

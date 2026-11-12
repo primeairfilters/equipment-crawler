@@ -87,7 +87,10 @@ def read_original(sha, page_count, file_type="pdf"):
     try:
         if file_type != "pdf":
             return file_layout(data, file_type)
-        return extract_layout(data, timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)))
+        # the reader sets its own limit from the pages it finds: a PDF whose crawl read failed has no page count, and
+        # the 180 s floor cut off a 259-page Ruud manual that reads in about 80 s (parse issue 834)
+        return extract_layout(data, timeout=max(LAYOUT_TIMEOUT_SECONDS, LAYOUT_SECONDS_PER_PAGE * (page_count or 0)),
+                              per_page=LAYOUT_SECONDS_PER_PAGE)
     except ExtractError as exc:
         return exc
 

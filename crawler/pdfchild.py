@@ -1,7 +1,8 @@
 """Reads a PDF from stdin and prints its page texts as JSON. Run only as a child process with limits.
 
 `pdfchild.py <max_pages>` prints {"pages": [text, ...]}. `pdfchild.py <max_pages> layout <floor> <per_page>` also sets its
-own time limit once it knows the page count (main). `pdfchild.py <max_pages> layout` also prints
+own time limit once it knows the page count (main). `pdfchild.py ... pdfium` reads every page with pdfium
+alone (plain lines, no tables) and adds "reader": "pdfium". `pdfchild.py <max_pages> layout` also prints
 {"layout": [[item, ...] per page]}: text lines with their font size and boldness, and ruled tables as rows, in
 reading order (for the sectioner, P12). Both print {"rows": [[drawn, real] per page]}: lines of text drawn as shapes
 and lines of real text, so the parent can tell a text layer that holds only fragments.
@@ -570,9 +571,12 @@ def _overprinted_or_unreadable(page):
 
 
 def main():
-    max_pages = int(sys.argv[1])
-    layout = len(sys.argv) > 2 and sys.argv[2] == "layout"
-    floor, per_page = (int(sys.argv[3]), int(sys.argv[4])) if len(sys.argv) > 4 else (None, None)
+    # "pdfium" last: every page read by pdfium alone, no tables (the parent's second try, textextract._read)
+    pdfium_only = sys.argv[-1] == "pdfium"
+    argv = sys.argv[:-1] if pdfium_only else sys.argv
+    max_pages = int(argv[1])
+    layout = len(argv) > 2 and argv[2] == "layout"
+    floor, per_page = (int(argv[3]), int(argv[4])) if len(argv) > 4 else (None, None)
     import pdfplumber
     import pypdfium2
     _clip_aware()
@@ -585,6 +589,8 @@ def main():
     pages, layouts, rows = [], [], []
     fast = pypdfium2.PdfDocument(data)
     try:
+        if pdfium_only:
+            raise ValueError("pdfium only")  # pdf None: every page goes the pdfium way below
         pdf = pdfplumber.open(io.BytesIO(data), **({"laparams": {}} if layout else {}))
     except Exception:
         # pdfminer cannot open it ("Unexpected EOF", "No /Root object": Daikin submittals, parse issues 379 and 384)
@@ -637,6 +643,8 @@ def main():
             next_page()
     fast.close()
     out = {"pages": pages, "rows": rows, "page_total": total}
+    if pdfium_only:
+        out["reader"] = "pdfium"
     if layout:
         out["layout"] = layouts
     sys.stdout.write(json.dumps(out))

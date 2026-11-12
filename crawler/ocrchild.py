@@ -16,11 +16,20 @@ DPI = 300
 MAX_PIXELS = 17_000_000  # a big sheet is drawn smaller: a 42 x 30 inch as-built at 300 dpi is 114 million pixels and
 # Tesseract ran past its limit; its notes read in 3 s at 100 dpi (2026-11-08). Letter, A3 and 11 x 17 stay near 300 dpi
 MIN_CONFIDENCE = 40
+RETRY_DPI = 200  # a page Tesseract finds no words on at DPI is read again at this: a Chicago Faucets manual scanned as 400 dpi
+# black-and-white pictures read nothing at 300 and 100-300 words a page at 200 (parse issue 706, 2026-11-12)
 
 
 def read_page(page):
     width, height = page.get_size()
-    scale = min(DPI / 72, (MAX_PIXELS / (width * height)) ** 0.5)
+    most = (MAX_PIXELS / (width * height)) ** 0.5
+    lines = _read_at(page, min(DPI / 72, most))
+    if not lines and most > RETRY_DPI / 72:
+        lines = _read_at(page, RETRY_DPI / 72)
+    return lines
+
+
+def _read_at(page, scale):
     image = page.render(scale=scale, grayscale=True).to_pil()
     png = io.BytesIO()
     image.save(png, "PNG")

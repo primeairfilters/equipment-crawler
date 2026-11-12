@@ -444,3 +444,55 @@ def test_a_letter_page_is_still_drawn_for_ocr_at_300_dpi():
     with pytest.raises(subprocess.TimeoutExpired):
         ocrchild.read_page(Page())
     assert drawn == [300 / 72]
+
+
+def _tsv(*words):
+    head = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+    return head + "".join(f"5\t1\t1\t1\t1\t{n}\t{10 * n}\t10\t8\t12\t95\t{w}\n" for n, w in enumerate(words, start=1))
+
+
+def test_a_scan_tesseract_reads_nothing_from_at_300_dpi_is_read_again_at_200(monkeypatch):
+    # parse issue 706 (2026-11-12): a Chicago Faucets manual scanned as 400 dpi black-and-white pictures. Drawn at 300
+    # dpi Tesseract found no words on any of its pages; drawn at 200 it read every page (100-300 words each)
+    from PIL import Image
+    from crawler import ocrchild
+    drawn, runs = [], []
+
+    class Page:
+        def get_size(self):
+            return 760, 582
+
+        def render(self, scale, grayscale):
+            drawn.append(scale)
+            return type("Bitmap", (), {"to_pil": lambda self: Image.new("L", (40, 40), 255)})()
+
+    class Done:
+        def __init__(self, out):
+            self.stdout = out.encode()
+
+    def tesseract(*args, **kwargs):
+        runs.append(1)
+        return Done(_tsv() if len(runs) == 1 else _tsv("Care", "and", "Maintenance"))
+
+    monkeypatch.setattr(ocrchild.subprocess, "run", tesseract)
+    lines = ocrchild.read_page(Page())
+    assert drawn == [300 / 72, 200 / 72]
+    assert [line["text"] for line in lines] == ["Care and Maintenance"]
+
+
+def test_a_page_read_at_300_dpi_is_not_read_again(monkeypatch):
+    from PIL import Image
+    from crawler import ocrchild
+    drawn = []
+
+    class Page:
+        def get_size(self):
+            return 612, 792
+
+        def render(self, scale, grayscale):
+            drawn.append(scale)
+            return type("Bitmap", (), {"to_pil": lambda self: Image.new("L", (40, 40), 255)})()
+
+    monkeypatch.setattr(ocrchild.subprocess, "run", lambda *a, **k: type("D", (), {"stdout": _tsv("Wiring").encode()})())
+    assert [line["text"] for line in ocrchild.read_page(Page())] == ["Wiring"]
+    assert drawn == [300 / 72]

@@ -479,3 +479,96 @@ def test_a_page_pdfium_cannot_load_is_read_by_pdfplumber(monkeypatch):
     out = _read_real(monkeypatch, make_pdf(TWO_PAGES))
     assert "level pad" in out["pages"][0]
     assert "refrigerant charge" in out["pages"][1]
+
+
+def test_a_section_build_of_a_pdf_with_no_page_count_gets_time_for_its_pages(monkeypatch):
+    # parse issue 834 (2026-11-12): a 259-page Ruud service manual whose crawl read had failed had no page count, so the
+    # section build gave it only the 180 s floor; it reads in about 80 s on the Mac and ran out of time on the server.
+    # The reader now sets its own limit from the pages it finds, as the crawl read does.
+    import crawler.kb as kb
+    import crawler.textextract as t
+    calls = []
+
+    def child(data, args, timeout, memory, child="pdfchild.py"):
+        calls.append((args, timeout))
+        return {"pages": [], "layout": [], "rows": []}
+
+    monkeypatch.setattr(kb.library, "configured", lambda: True)
+    monkeypatch.setattr(kb.library, "read", lambda sha, file_type="pdf": b"%PDF")
+    monkeypatch.setattr(t, "_kept_layout", lambda data, max_pages: None)
+    monkeypatch.setattr(t, "_keep_layout", lambda data, max_pages, raw: None)
+    monkeypatch.setattr(t, "_run_child", child)
+    kb.read_original("0" * 64, 0)
+    (args, timeout), = calls
+    assert args[1:] == ["layout", str(t.LAYOUT_TIMEOUT_SECONDS), str(kb.LAYOUT_SECONDS_PER_PAGE)]
+    assert timeout >= kb.LAYOUT_SECONDS_PER_PAGE * t.PDF_MAX_PAGES  # the parent waits for the longest the reader may take
+
+
+# ---------------------------------------------------------------- pdfium only when the full read fails (2026-11-12)
+
+def _fallback(monkeypatch, outcomes):
+    """_read with the kept-layout cache off and a child that gives each outcome in turn (an answer or an ExtractError)."""
+    import crawler.textextract as t
+    calls = []
+
+    def child(data, args, timeout, memory, child="pdfchild.py"):
+        calls.append(list(args))
+        out = outcomes[len(calls) - 1]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    monkeypatch.setattr(t, "_kept_layout", lambda data, max_pages: None)
+    monkeypatch.setattr(t, "_keep_layout", lambda data, max_pages, raw: None)
+    monkeypatch.setattr(t, "_run_child", child)
+    return calls
+
+
+@pytest.mark.parametrize("failure", [
+    ("could not read the PDF", "pdfchild.py exit -6: pdfchild.py: time limit 595 s for 119 pages"),  # Grohe, issue 835
+    ("the PDF took too long to read", "pdfchild.py: time limit 355 s for 71 pages"),  # Evapco, issue 187
+])
+def test_a_pdf_the_full_reader_cannot_finish_is_read_again_with_pdfium_only(monkeypatch, failure):
+    # parse issues 187, 258, 265, 504, 835: big PDFs crashed at the 1 GB limit or ran out of time and kept no text at
+    # all. pdfium alone read the 119-page Grohe book in 4 s with 275 MB; its pages are plain lines, no tables (user)
+    import crawler.textextract as t
+    answer = {"pages": ["Grohe Eurosmart"], "layout": [[]], "rows": [[0, 1]], "page_total": 1}
+    calls = _fallback(monkeypatch, [t.ExtractError(*failure), answer])
+    assert t._read(b"%PDF", 800, 240, t.PDF_MEMORY_BYTES, 5) == answer
+    assert calls[0][-1] != "pdfium" and calls[1] == calls[0] + ["pdfium"]
+
+
+def test_when_pdfium_alone_fails_too_the_first_readers_error_is_kept(monkeypatch):
+    import crawler.textextract as t
+    first = t.ExtractError("could not read the PDF", "pdfchild.py exit -6 (killed: memory limit or a crash)")
+    calls = _fallback(monkeypatch, [first, t.ExtractError("could not read the PDF", "Data format error")])
+    with pytest.raises(t.ExtractError) as caught:
+        t._read(b"%PDF", 800, 240, t.PDF_MEMORY_BYTES, 5)
+    assert caught.value is first and len(calls) == 2
+
+
+def test_a_pdf_locked_with_a_password_is_not_read_again(monkeypatch):
+    import crawler.textextract as t
+    calls = _fallback(monkeypatch, [t.ExtractError(t.NEEDS_PASSWORD, "Incorrect password")])
+    with pytest.raises(t.ExtractError):
+        t._read(b"%PDF", 800, 240, t.PDF_MEMORY_BYTES, 5)
+    assert len(calls) == 1
+
+
+def test_a_pdf_read_well_is_read_once_by_the_full_reader(monkeypatch):
+    import crawler.textextract as t
+    answer = {"pages": ["x"], "layout": [[]], "rows": [[0, 1]], "page_total": 1}
+    calls = _fallback(monkeypatch, [answer])
+    t._read(b"%PDF", 800, 240, t.PDF_MEMORY_BYTES, 5)
+    assert len(calls) == 1 and "pdfium" not in calls[0]
+
+
+def test_the_reader_can_read_every_page_with_pdfium_only(monkeypatch):
+    # the real child: with "pdfium" it never opens the PDF with pdfplumber, and still gives each page's lines
+    import crawler.textextract as t
+    pdf = make_pdf([["Model RA15AZ24AJ3CA", "SEER2 15.2"], ["Fault code E5 low pressure"]])
+    raw = t._run_child(pdf, ["800", "layout", "240", "5", "pdfium"], 60, t.PDF_MEMORY_BYTES)
+    assert "RA15AZ24AJ3CA" in raw["pages"][0] and "E5" in raw["pages"][1] and raw["page_total"] == 2
+    assert raw["reader"] == "pdfium"  # marked, so a PDF read without its tables can be told apart
+    assert "reader" not in t._run_child(pdf, ["800", "layout", "240", "5"], 60, t.PDF_MEMORY_BYTES)
+    assert [i["text"] for i in raw["layout"][1]] == ["Fault code E5 low pressure"]
