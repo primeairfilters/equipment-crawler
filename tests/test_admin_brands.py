@@ -78,6 +78,9 @@ def test_a_brand_typed_on_the_page_is_discovered_approved_and_crawled_by_the_nex
     assert summary["brands"][name]["fetched"] >= 2 and summary["brands"][name]["tagged"] == 1
     assert any(own in line and "own site" in line for line in summary["hosts"])
     assert q(world.conn, "SELECT manuals FROM control.brand_status WHERE name = %s", (name,))[0][0] == 1
+    # The admin page reads the count from control.brand_manuals (0038), one pass for every brand.
+    assert q(world.conn, "SELECT m.manuals FROM control.brand_manuals m JOIN control.brands c ON c.id = m.brand_id "
+                         "WHERE c.name = %s", (name,))[0][0] == 1
 
 
 def test_discovery_is_not_asked_again_on_the_next_run(world):
