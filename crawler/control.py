@@ -3,6 +3,9 @@
 - sync: at the start of every `auto`, each page row is linked to a crawler brand (made if new) and its controls are
   copied: active runs, paused and archived are stopped; the monthly budget, the host-approval switch and the
   brand's trades (P23; empty = any trade).
+- take_start_pages: pages the user added on the Hosts tab (control.start_pages, user 2026-11-13) become start
+  addresses of their brand; the host is approved for all its pages and recorded as the user's decision, overruling
+  the host judge. One that cannot be taken keeps why (refused).
 - discover_brand: a brand never discovered is asked about once (crawler/discover.py, one live web-search call); of
   the hosts it names, the brand's own site (own_site: its name is in the address) is approved at once for all its
   pages, recorded as a 'rule' decision. Every other host waits for the host judge (P18), which only ever approves PDFs.
@@ -11,8 +14,10 @@ Nothing here commits; the caller does.
 """
 import json
 import re
+from urllib.parse import urlsplit
 
 from crawler import brands as crawler_brands
+from crawler.hosts import is_refused_host, normalize_host
 from crawler.hostjudge import enabled, never_asked
 
 OWN_SITE = "the brand's own site: its name is in the address"
@@ -40,7 +45,47 @@ def sync(conn):
     _rows(conn, "UPDATE brands b SET monthly_budget_usd = c.monthly_budget_usd, auto_hosts = c.auto_hosts, "
                 "trades = c.trades FROM control.brands c WHERE c.crawl_brand_id = b.id AND (b.monthly_budget_usd, "
                 "b.auto_hosts, b.trades) IS DISTINCT FROM (c.monthly_budget_usd, c.auto_hosts, c.trades)")
+    take_start_pages(conn)
     return linked
+
+
+USER_PAGE = "you added a page on it"
+NEVER_CRAWL = "That website is on the never-crawl list."
+
+
+def take_start_pages(conn):
+    """Each page the user added and no run has taken yet: a start address of its brand, its host approved for all its
+    pages and the user's host decision. Returns how many were taken."""
+    taken = 0
+    for page_id, url, brand_id, name in _rows(
+            conn, "SELECT sp.id, sp.url, b.id, b.name FROM control.start_pages sp "
+                  "JOIN control.brands c ON c.id = sp.brand_id JOIN brands b ON b.id = c.crawl_brand_id "
+                  "WHERE sp.start_url_id IS NULL AND sp.refused IS NULL ORDER BY sp.id"):
+        try:
+            host = normalize_host(urlsplit(url).hostname or "")
+        except ValueError:
+            host = None
+        if host is None or is_refused_host(host):
+            why = NEVER_CRAWL if host else "That is not a web address the crawler can open."
+            _rows(conn, "UPDATE control.start_pages SET refused = %s WHERE id = %s", (why, page_id))
+            continue
+        with conn.transaction():  # a savepoint: a page that fails leaves nothing half done
+            try:
+                start_id = crawler_brands.add_start_url(conn, name, url)
+            except ValueError as exc:
+                start_id, why = None, str(exc)
+            if start_id is not None:
+                crawler_brands.approve_host(conn, host, brand=name)
+                _rows(conn, "UPDATE brand_domains SET scope = 'all' WHERE brand_id = %s AND host = %s", (brand_id, host))
+                _rows(conn, "INSERT INTO host_decisions (brand_id, host, state, decided_by, reason) "
+                            "VALUES (%s, %s, 'confirmed', 'user', %s) ON CONFLICT (brand_id, host) DO UPDATE SET "
+                            "state = 'confirmed', decided_by = 'user', reason = EXCLUDED.reason, "
+                            "updated_at = (now() AT TIME ZONE 'UTC')", (brand_id, host, USER_PAGE))
+                _rows(conn, "UPDATE control.start_pages SET start_url_id = %s WHERE id = %s", (start_id, page_id))
+                taken += 1
+            else:
+                _rows(conn, "UPDATE control.start_pages SET refused = %s WHERE id = %s", (why[:500], page_id))
+    return taken
 
 
 def own_site(brand, host):
