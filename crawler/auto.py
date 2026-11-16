@@ -27,7 +27,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 LOCK_KEY = 7_316_002_017  # pg advisory lock: one `auto` run at a time
@@ -35,6 +35,10 @@ AUTO_MAX_PAGES = 200  # per start address, per night
 WAIT_SECONDS = 2 * 3600  # how long a run waits for the AI's tagging answers
 POLL_SECONDS = 300
 CRAWL_WORKERS = 5  # brands crawled at once (user 2026-11-06); each site still gets one request at a time (fetch.py)
+# Every turn has an end (user 2026-11-16, prod run 36 sat 6.5 hours on Grundfos): a brand's loops stop at TURN_LIMIT
+# (the rest is picked up next run), and a worker still not back STUCK_GRACE after that is left behind.
+TURN_LIMIT = timedelta(hours=3)
+STUCK_GRACE = timedelta(minutes=30)
 
 
 def _rows(conn, sql, args=()):
@@ -203,7 +207,11 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     def work(conn, fetcher, commit, showing=lambda name: None):
         while (brand := take()) is not None:
             showing(brand[1])
-            turn(conn, fetcher, commit, *brand)
+            window.start_turn(TURN_LIMIT)
+            try:
+                turn(conn, fetcher, commit, *brand)
+            finally:
+                window.end_turn()
         showing(None)
 
     if workers > 1 and connect is not None:
@@ -383,6 +391,8 @@ def _workers(n, connect, make_fetcher, conn, commit, work, summary):
     from crawler import textextract
     from crawler.fetch import Fetcher
 
+    on_turn = {}  # worker number -> (when its brand's turn began, the brand), while it is on one
+
     def worker(number):
         mine = None
         try:
@@ -390,6 +400,10 @@ def _workers(n, connect, make_fetcher, conn, commit, work, summary):
             done = commit if mine is conn else mine.commit
 
             def showing(name):  # the admin page's card for this worker (user 2026-11-06)
+                if name:
+                    on_turn[number] = (time.monotonic(), name)
+                else:
+                    on_turn.pop(number, None)
                 _rows(mine, "INSERT INTO control.crawl_workers (worker, brand, since) VALUES (%s, %s, now() AT TIME "
                             "ZONE 'UTC') ON CONFLICT (worker) DO UPDATE SET brand = EXCLUDED.brand, since = "
                             "EXCLUDED.since", (number, name))
@@ -403,14 +417,29 @@ def _workers(n, connect, make_fetcher, conn, commit, work, summary):
                 mine.close()
 
     textextract.limit_readers(1)
-    threads = [threading.Thread(target=worker, args=(k + 1,), name=f"crawl-{k + 1}") for k in range(n)]
+    # daemon: a worker left behind (below) never keeps the run's process from ending
+    threads = [threading.Thread(target=worker, args=(k + 1,), name=f"crawl-{k + 1}", daemon=True) for k in range(n)]
     for t in threads:
         t.start()
 
     def wait():
+        """Until every worker is done, or every one still going is stuck past its turn limit: those are left behind
+        (their brands are picked up next run) and the run goes on to its closing steps."""
         try:
-            for t in threads:
-                t.join()
+            give_up = (TURN_LIMIT + STUCK_GRACE).total_seconds()
+            while True:
+                going = [k + 1 for k, t in enumerate(threads) if t.is_alive()]
+                if not going:
+                    return
+                now = time.monotonic()
+                stuck = {k: on_turn[k] for k in going if k in on_turn and now - on_turn[k][0] > give_up}
+                if len(stuck) == len(going):
+                    for k, (since, name) in sorted(stuck.items()):
+                        summary["needs_you"].append(
+                            f"crawler {k} was stuck on {name} for {(now - since) / 3600:.1f} hours: the run went on "
+                            f"without it ({name} is picked up next run; `docker kill -s USR1` on a stuck run shows where)")
+                    return
+                threads[going[0] - 1].join(timeout=min(5.0, give_up))
         finally:
             textextract.limit_readers(None)
     return wait

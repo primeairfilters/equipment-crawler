@@ -20,6 +20,8 @@ def settings(kind):
         "password": os.environ[prefix + "_PASSWORD"],
         "dbname": os.environ.get("EQ_DB_NAME", "tracforce_equipment"),
         "connect_timeout": 10,
+        # A connection whose other end went away is noticed in about two minutes, not the system's two hours (2026-11-16).
+        "keepalives": 1, "keepalives_idle": 60, "keepalives_interval": 10, "keepalives_count": 6,
         "options": f"-c search_path={path.replace(' ', '')} -c timezone=UTC",
     }
 

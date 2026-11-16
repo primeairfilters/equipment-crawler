@@ -7,6 +7,7 @@ times once a minute (`recheck`), so turning the switch off, or changing the time
 pages, the tagging wait, sections, embedding, re-reads) can ask `time_up()` without every call passing it down; with
 no stop set (a run by hand, the tests) time is never up. Times are naive UTC, like the database's.
 """
+import threading
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,7 @@ _now = None
 _recheck = None
 _checked_at = None
 RECHECK_EVERY = timedelta(minutes=1)
+_turn = threading.local()  # each worker's own turn limit (2026-11-16): time_up() is also true once it has passed
 
 
 def utcnow():
@@ -97,6 +99,15 @@ def clear():
     set_stop(None)
 
 
+def start_turn(limit):
+    """This worker's brand turn ends `limit` from now: its loops see time_up(); other workers' do not."""
+    _turn.deadline = (_now or utcnow)() + limit
+
+
+def end_turn():
+    _turn.deadline = None
+
+
 def time_up():
     global _stop_at, _checked_at
     now = (_now or utcnow)()
@@ -106,4 +117,7 @@ def time_up():
             _stop_at = _recheck(now)
         except Exception:
             pass  # the database hiccuped: keep the stop we had and ask again in a minute
+    deadline = getattr(_turn, "deadline", None)
+    if deadline is not None and now >= deadline:
+        return True
     return _stop_at is not None and now >= _stop_at

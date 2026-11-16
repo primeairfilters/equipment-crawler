@@ -296,6 +296,10 @@ def _link_checker():
 
 
 def main(argv):
+    # `docker kill -s USR1 <container>` prints every thread's stack to the log, so a stuck run shows where (2026-11-16)
+    import faulthandler
+    import signal
+    faulthandler.register(signal.SIGUSR1, file=sys.__stderr__, all_threads=True)
     args = build_parser().parse_args(argv)
     if args.command == "prune":
         from crawler.db import connect

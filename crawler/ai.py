@@ -111,7 +111,9 @@ class AnthropicClient:
         key = api_key or os.environ.get("ANTHROPIC_API_KEY_CRAWLER")
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY_CRAWLER is not set.")
-        self._sdk = anthropic.Anthropic(api_key=key)
+        # A stalled call gives up after 5 minutes and is tried once more, not the SDK's 10 minutes and 2 retries: prod
+        # run 36 (2026-11-16) sat 6.5 hours on one brand, most likely on a call that never answered.
+        self._sdk = anthropic.Anthropic(api_key=key, timeout=300.0, max_retries=1)
 
     @staticmethod
     def _system(system):
