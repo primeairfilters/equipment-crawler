@@ -17,7 +17,9 @@ def fetch(url=None, opener=urllib.request.urlopen):
     """The trade keys in Tracforce's order, without Other. Raises Unavailable when the list cannot be read."""
     url = url or os.environ.get("TRACFORCE_TRADES_URL") or DEFAULT_URL
     try:
-        with opener(url, timeout=10) as response:
+        # The crawler's own name: Cloudflare answers Python's default "Python-urllib" with a 403 (prod, 2026-11-16).
+        from crawler.fetch import USER_AGENT
+        with opener(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=10) as response:
             trades = json.load(response)["trades"]
         keys = [t["value"] for t in trades if t["value"] != NOT_A_BRAND_TRADE]
     except Exception as error:

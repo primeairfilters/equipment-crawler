@@ -354,11 +354,13 @@ def test_the_trades_come_from_tracforces_list_without_other():
     body = {"trades": [{"value": "hvac", "label": "HVAC"}, {"value": "solar_panels", "label": "Solar Panels"},
                        {"value": "other", "label": "Other"}]}
     asked = []
-    def opener(url, timeout):
-        asked.append(url)
+    def opener(request, timeout):
+        asked.append((request.full_url, request.get_header("User-agent")))
         return _Answer(json.dumps(body).encode())
     assert fetch("http://main.test/api/public/trades", opener) == ["hvac", "solar_panels"]
-    assert asked == ["http://main.test/api/public/trades"]
+    # The crawler's own name: Cloudflare turns away Python's default "Python-urllib" with a 403 (prod, 2026-11-16).
+    from crawler.fetch import USER_AGENT
+    assert asked == [("http://main.test/api/public/trades", USER_AGENT)]
 
 
 @pytest.mark.parametrize("answer", [b"not json", b'{"trades": []}', b'{"nope": 1}'])
