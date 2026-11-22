@@ -127,8 +127,8 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         from crawler.embed import embed_pass
         embedded = step(label, lambda: embed_pass(conn, embedder, after_request=commit))
         summary["embedded"] += (embedded or {}).get("embedded", 0)
-        if embedded and embedded.get("capped") and "embedding stopped at the monthly AI cap" not in summary["needs_you"]:
-            summary["needs_you"].append("embedding stopped at the monthly AI cap")
+        if embedded and embedded.get("capped") and "embedding stopped at its own $5 a month" not in summary["needs_you"]:
+            summary["needs_you"].append("embedding stopped at its own $5 a month")
 
     def start_of_run():
         """Beside the workers, not before them (user 2026-11-07: prod run 19's worker cards sat idle while the run
@@ -136,6 +136,8 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0,
                                                                                  "rejected": 0}
         retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
+        from crawler.known_models import link_known_models  # free: manuals with no models get the known ones they print
+        summary["models_linked"] = step("linking known models to manuals", lambda: link_known_models(conn)) or 0
         step("parse issue list", lambda: _report_if_stale(conn, commit))
         vectors("embedding what last night built")
         return retried
