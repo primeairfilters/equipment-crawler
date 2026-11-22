@@ -16,6 +16,15 @@ by whether it gets more of the right documents, sooner, for less:
 
 When two of these pull against each other, say so and name the trade-off instead of picking silently.
 
+## SESSION_HISTORY.md — read it, keep it
+
+**Read `SESSION_HISTORY.md` at the start of any crawler work.** It holds what past sessions changed, found and
+learned against the theme: how waste was found, what was fixed and why, prod numbers, and what is still open.
+
+**Add to it as you go, in the same change, without being asked:** every change, discovery, measurement or insight that
+would help a future session keep to the theme. Newest first, dated, with the evidence (the query or test) and what is
+still open. Move an item out of "still open" when it is done or decided.
+
 ## The crawler is always a work in progress — make it faster
 
 **The crawler is never finished, and speed is the most important thing about it.** Every time anything in the crawler

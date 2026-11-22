@@ -108,14 +108,36 @@ def test_robots_redirected_to_an_approved_host_that_allows_lets_the_page_through
     assert ruud.site.hits("/robots.txt", host="other.test")
 
 
-def test_robots_redirected_to_an_unapproved_host_means_blocked(ruud):
-    redirect_robots(ruud, "evilruud.test")
-    ruud.site.route("/robots.txt", b"User-agent: *\nDisallow:\n", host="evilruud.test",
+def test_robots_redirected_to_another_path_on_the_same_host_is_read_there(ruud):
+    # Prod 2026-11-21: www.danby.com/robots.txt -> /en-us/robots.txt; the crawler asked for /robots.txt again, looped,
+    # and refused the whole site (39 pages read, 209 waiting).
+    ruud.site.route("/robots.txt", status=301, host="ruud.test", headers={"Location": "/en-us/robots.txt"})
+    ruud.site.route("/en-us/robots.txt", b"User-agent: *\nDisallow: /private/\n", host="ruud.test",
                     headers={"Content-Type": "text/plain"})
+    assert get(ruud, "/p").outcome == "fetched"
+    assert ruud.site.hits("/en-us/robots.txt")
+    assert get(ruud, "/private/x").reason == "robots"  # and its rules are the ones used
+
+
+# The user, 2026-11-21: a robots.txt redirect to a site not approved is followed, only to read the rules (RFC 9309
+# 2.3.1.2). Prod: www.fujitsugeneral.com -> www.airstagehvac.com and literature.nortekhvac.com ->
+# literature.nordyne.com had their whole sites refused. The other site is not approved by this: nothing else is fetched.
+
+def test_robots_redirected_to_an_unapproved_host_is_read_there_and_its_rules_used(ruud):
+    redirect_robots(ruud, "airstage.test")
+    ruud.site.route("/robots.txt", b"User-agent: *\nDisallow: /private/\n", host="airstage.test",
+                    headers={"Content-Type": "text/plain"})
+    assert get(ruud, "/p").outcome == "fetched"
+    assert ruud.site.hits("/robots.txt", host="airstage.test")  # the redirect was followed
+    assert get(ruud, "/private/x").reason == "robots"            # and its rules are the ones used
+    assert [h["path"] for h in ruud.site.hits(host="airstage.test")] == ["/robots.txt"]  # nothing else asked there
+
+
+def test_robots_redirected_to_a_refused_host_means_blocked(ruud):
+    redirect_robots(ruud, "www.ahridirectory.org")
     result = get(ruud, "/p")
     assert (result.outcome, result.reason) == ("refused", "robots")
-    assert ruud.site.hits("/robots.txt", host="ruud.test")  # the first hop ran
-    assert ruud.site.hits(host="evilruud.test") == []
+    assert ruud.site.hits(host="www.ahridirectory.org") == []
     assert ruud.site.hits("/p") == []
 
 

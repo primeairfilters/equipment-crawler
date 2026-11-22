@@ -397,7 +397,7 @@ class Fetcher:
 
     def _fetch_robots(self, host_id, target, approved):
         target = target._replace(path_query="/robots.txt")
-        for _ in range(4):
+        for _ in range(6):  # the first request and up to 5 redirects (RFC 9309 2.3.1.2: follow at least five)
             try:
                 raw = self._get(host_id, target, {},
                                 _robots_limit)
@@ -406,9 +406,12 @@ class Fetcher:
             location = raw.headers.get("location")
             if raw.status in REDIRECTS and location:
                 nxt = urlsplit(urljoin(f"{target.scheme}://{target.hostport}/robots.txt", location))
+                # followed to any public site, approved or not, only to read the rules (RFC 9309 2.3.1.2; the user
+                # 2026-11-21: Fujitsu's robots.txt moved to www.airstagehvac.com and its whole site was refused). A
+                # refused host (AHRI) is never asked; _get still allows public addresses only.
                 try:
-                    ok = in_scope(nxt.geturl(), approved)
                     new_host = normalize_host(nxt.hostname or "")
+                    ok = nxt.scheme in ("http", "https") and "." in new_host and not is_refused_host(new_host)
                     port = nxt.port or (443 if nxt.scheme == "https" else 80)
                 except ValueError:
                     ok = False
@@ -417,7 +420,10 @@ class Fetcher:
                 if new_host != target.host:
                     host_id = self._host_row(new_host)["id"]
                 hostport = new_host + (f":{nxt.port}" if nxt.port else "")
-                target = Target(nxt.scheme, new_host, port, hostport, "/robots.txt")
+                # the address the redirect gives, not /robots.txt again (2026-11-21: www.danby.com -> /en-us/robots.txt
+                # looped until the whole site was refused)
+                path = (nxt.path or "/robots.txt") + (f"?{nxt.query}" if nxt.query else "")
+                target = Target(nxt.scheme, new_host, port, hostport, path)
                 continue
             if raw.too_big or (200 <= raw.status < 300 and raw.body is None):
                 return 0, None
