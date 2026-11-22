@@ -1,4 +1,9 @@
-"""Free discovery: `Sitemap:` lines in an approved host's cached robots.txt, read through the safe fetcher."""
+"""Free discovery: `Sitemap:` lines in an approved host's cached robots.txt, read through the safe fetcher.
+
+A sitemap is asked for only when it is due (its recheck date, or its retry wait after a failure), and then read in full
+even when it has not changed, so an unchanged index still leads to its sitemaps and a start address added since gets
+its pages (2026-11-21: an unchanged one came back with no body and was dropped, and every sitemap was asked for every
+night)."""
 import hashlib
 import re
 from urllib.parse import urlsplit
@@ -82,10 +87,10 @@ def read_sitemaps(conn, fetcher, brand_name, *, max_urls=MAX_SITEMAP_URLS):
                 added += 1 if cur.rowcount == 1 else 0
 
     def read(url):
-        if not in_scope(url, approved):
+        if not in_scope(url, approved) or not fetcher.is_due(brand_id, url):
             return None, []
         result = fetcher.fetch(url, brand_id, xml=True)
-        if result.outcome != "fetched":
+        if result.outcome not in ("fetched", "not_modified") or not result.body:
             return None, []
         return _locs(result.body, max_urls)
 

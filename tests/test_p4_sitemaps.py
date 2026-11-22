@@ -133,6 +133,30 @@ def test_a_sitemap_index_is_followed_one_level_only(w):
     assert w.site.hits("/s3.xml") == []  # the third was not
 
 
+# 2026-11-21: an unchanged sitemap came back as "not modified" with no body, so its sub-sitemaps were never read again
+# and a start address added later never got its pages from it; and every sitemap was asked for again every night.
+
+def test_an_unchanged_sitemap_index_still_leads_to_its_sitemaps_when_it_is_due_again(w):
+    from crawler.brands import add_start_url
+    set_robots(w, f"Sitemap: {w.url('ruud.test', '/index.xml')}")
+    w.site.route("/index.xml", index(w.url("ruud.test", "/s1.xml")), headers=XML)
+    w.site.route("/s1.xml", urlset(under(w, "a"), w.url("ruud.test", "/products/hvac/furnaces/g1")), headers=XML)
+    assert read(w) == 1
+    add_start_url(w.conn, w.brand, w.url("ruud.test", "/products/hvac/furnaces/"))  # a section added later
+    w.clock.advance(31 * 24 * 3600)
+    set_robots(w, f"Sitemap: {w.url('ruud.test', '/index.xml')}")
+    assert read(w) == 1  # the same index and sitemap, read again: the furnace page is found now
+    assert w.url("ruud.test", "/products/hvac/furnaces/g1") in sitemap_urls(w)
+
+
+def test_a_sitemap_is_not_asked_for_again_before_it_is_due(w):
+    set_robots(w, f"Sitemap: {w.url('ruud.test', '/sitemap.xml')}")
+    w.site.route("/sitemap.xml", urlset(under(w, "a")), headers=XML)
+    read(w)
+    read(w)
+    assert len(w.site.hits("/sitemap.xml")) == 1
+
+
 def test_at_most_max_urls_are_taken_from_one_sitemap(w):
     set_robots(w, f"Sitemap: {w.url('ruud.test', '/sitemap.xml')}")
     w.site.route("/sitemap.xml", urlset(*[under(w, f"m{n:02d}") for n in range(12)]), headers=XML)

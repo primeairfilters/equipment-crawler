@@ -549,7 +549,9 @@ class Fetcher:
                 else:
                     # the ETag and date belong to the address that answered them: the first hop, or the final one a
                     # redirect reached last time (2026-11-21: 1,314 redirected PDFs were downloaded whole on each recheck)
-                    if existing and existing["content_sha"] and (hop == 0 or current == existing["final_url"]) and (
+                    # not for a sitemap: it is read in full when due, since no copy is kept to read again (sitemaps.py)
+                    if kind != "xml" and existing and existing["content_sha"] and (
+                            hop == 0 or current == existing["final_url"]) and (
                             not existing["is_pdf"] or not library.configured() or library.has_file(existing["content_sha"])):
                         if existing["etag"]:
                             conditional["If-None-Match"] = existing["etag"]
@@ -629,7 +631,7 @@ class Fetcher:
             self._host_ok(host_id)
             if unchanged:
                 return Result("not_modified", http_status=raw.status, url=current, is_pdf=is_pdf, page_id=page_id,
-                              body=raw.body if is_pdf else b"", mime=mime)
+                              body=raw.body if is_pdf or kind == "xml" else b"", mime=mime)
             return Result("fetched", http_status=raw.status, body=raw.body, url=current, is_pdf=is_pdf,
                           page_id=page_id, mime=mime)
 
