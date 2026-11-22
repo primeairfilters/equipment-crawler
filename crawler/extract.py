@@ -15,6 +15,7 @@ from decimal import Decimal
 from crawler import ai, issues
 from crawler.brands import UnknownTarget, find_brand
 from crawler.db import try_lock, unlock
+from crawler.fetch import OFFICE_TYPES
 from crawler.kb import hide
 from crawler.store import save_document
 from crawler.verify import verify
@@ -384,9 +385,10 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
         "  OR (p.extraction_status IN ('extracted', 'skipped') "
         "    AND (p.ai_extractor_version IS NULL OR p.ai_extractor_version <> %s))) "
         # PDFs, and every upload (a spreadsheet too: EQUIPMENT_FILE_UPLOADS.md phase 2)
-        "AND (p.is_pdf OR p.url LIKE 'upload://%%') AND EXISTS (SELECT 1 FROM page_text t WHERE t.page_id = p.id)"
+        "AND (p.is_pdf OR p.url LIKE 'upload://%%' OR p.content_type IN (%s, %s)) "  # crawled .xlsx/.docx (2026-11-21)
+        "AND EXISTS (SELECT 1 FROM page_text t WHERE t.page_id = p.id)"
         + (" AND p.brand_id = %s" if brand_id else "") + " ORDER BY p.id",
-        (now, EXTRACTOR_VERSION, EXTRACTOR_VERSION, *((brand_id,) if brand_id else ())))
+        (now, EXTRACTOR_VERSION, EXTRACTOR_VERSION, *OFFICE_TYPES.values(), *((brand_id,) if brand_id else ())))
 
     spent = ai.monthly_spend(conn, now)
     in_flight = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages WHERE ai_batch_id IS NOT NULL")[0][0])

@@ -128,7 +128,7 @@ def _body_limit(status, headers):
     kind = headers.get("content-type", "").split(";")[0].strip().lower()
     if kind in HTML_TYPES:
         return MAX_HTML_BYTES
-    if kind == "application/pdf":
+    if kind == "application/pdf" or kind in OFFICE_TYPES.values():  # a spreadsheet or Word file: OFFICE_TYPES below
         return MAX_PDF_BYTES
     return 0
 
@@ -140,6 +140,28 @@ def _pdf_address_limit(status, headers):
     """A .pdf address: some hosts serve PDFs as octet-stream (files.myrheem.com, 2026-10-28); the body must still start
     with the PDF signature (fetch checks it)."""
     if 200 <= status < 300 and _encoding_ok(headers) and kind_of(headers) in OCTET_TYPES:
+        return MAX_PDF_BYTES
+    return _body_limit(status, headers)
+
+
+# Spreadsheets and Word files on brand sites, read like uploads (filereaders.py; 2026-11-21: 479 .xlsx and 339 .docx
+# were thrown away as bad_content_type). Taken by their own type, or as octet-stream at an address with their ending;
+# the body must be a zip either way (fetch checks it).
+OFFICE_TYPES = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+
+
+def office_ending(url):
+    """'xlsx' or 'docx' for an address with that ending, else None."""
+    try:
+        path = urlsplit(url).path.lower()
+    except ValueError:
+        return None
+    return next((kind for kind in OFFICE_TYPES if path.endswith("." + kind)), None)
+
+
+def _office_address_limit(status, headers):
+    if 200 <= status < 300 and _encoding_ok(headers) and kind_of(headers) in OCTET_TYPES + tuple(OFFICE_TYPES.values()):
         return MAX_PDF_BYTES
     return _body_limit(status, headers)
 
@@ -566,7 +588,8 @@ class Fetcher:
                     if api:
                         limit = _json_body_limit
                     else:
-                        limit = _pdf_address_limit if kind == "page" and is_pdf_link(current) else LIMITS[kind]
+                        limit = (_pdf_address_limit if kind == "page" and is_pdf_link(current) else
+                                 _office_address_limit if kind == "page" and office_ending(current) else LIMITS[kind])
                     raw = self._get(host_id, target, conditional, limit)
             except _Refused as refused:
                 if api:
@@ -605,7 +628,14 @@ class Fetcher:
                     raise _NoApi("not_an_article")
                 raw = raw._replace(body=html)
 
-            is_pdf = not api and (kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES)
+            office = None  # 'xlsx' or 'docx': by its declared type, or octet-stream at an address with its ending
+            if kind == "page" and not api:
+                office = next((k for k, m in OFFICE_TYPES.items() if kind_of(raw.headers) == m), None) or (
+                    (office_ending(current) or office_ending(url)) if kind_of(raw.headers) in OCTET_TYPES else None)
+                if office and not raw.body.startswith(b"PK\x03\x04"):
+                    return failed(f"not_{office}", raw.status)
+            is_pdf = not api and not office and (
+                kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES)
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
             if not is_pdf and self._pdf_only(brand_id, target.host):  # a host the crawler approved gives PDFs only (P18)
@@ -613,11 +643,14 @@ class Fetcher:
             mime = "application/pdf" if is_pdf else kind_of(raw.headers)  # octet-stream PDFs are kept as PDFs
             if api:
                 mime = "text/html"  # the article as a small web page (crawler/zendesk.py)
+            if office:
+                mime = OFFICE_TYPES[office]  # kept as its own type, whatever the server called it
 
             sha = hashlib.sha256(raw.body).hexdigest()
             cols = {
                 "http_status": raw.status,
-                "content_type": "text/html; charset=utf-8" if api else raw.headers.get("content-type", "")[:190],
+                "content_type": ("text/html; charset=utf-8" if api else mime if office
+                                 else raw.headers.get("content-type", "")[:190]),
                 "etag": (raw.headers.get("etag") or None) and raw.headers.get("etag")[:255],
                 "last_modified": (raw.headers.get("last-modified") or None) and raw.headers.get("last-modified")[:100],
                 "content_sha": sha,

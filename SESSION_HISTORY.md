@@ -139,6 +139,17 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   failures, 1,356 were .zip, 487 .dwg, 341 .rtf, 198 .rfa. Spreadsheets and Word files are deliberately not on the
   list.
 
+- **Spreadsheets and Word files on brand sites are read and tagged like PDFs.** 479 `.xlsx` and 339 `.docx` downloads
+  were thrown away as `bad_content_type`, though `filereaders.py` reads both for uploads. Taken by their declared type,
+  or as octet-stream at an address with the ending, and the body must be a zip; price lists are left out as for
+  uploads; originals are stored as .xlsx/.docx (`fetch.OFFICE_TYPES`, `crawl._office`, `library.EXTENSIONS`, tagging
+  filter in `extract.py`; tests in `test_crawled_office.py`).
+- **Bug from the embedding change, fixed:** removing `embed.DEFAULT_CAP_USD` broke `crawler/search.py`'s import, so the
+  nightly Breeze-miss step (`misses.py`) and `./crawl ask`/`eval` failed to load. Breeze itself was not affected (it
+  searches with HVACApp's own `EquipmentKnowledgeSearch.sql`). `search.py` now has its own default. Lesson: after
+  removing a name, import every module (`python -c "import pkgutil, importlib, crawler; ..."`) and run the tests of
+  every file that imported it, not only the changed file's tests.
+
 ### Still open from 2026-11-21
 
 - **Fujitsu's whole site moved to `www.airstagehvac.com`**, not just its robots.txt: product pages answer 308 there
@@ -154,6 +165,8 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
 - Smaller leads from the code review, not yet checked on prod: a big backlog sent as one batch could pass the Batch
   API size limit; token counting runs before the cap check; a sheet over 95k tokens is skipped silently; any edit to
   `textextract.py` rebuilds every document's sections; scanned PDFs whose OCR failed are never retried.
-- **Spreadsheets and Word files on brand sites are thrown away:** 479 `.xlsx`, 339 `.docx`, 181 `.doc` and 120 `.xls`
-  downloads failed as `bad_content_type`, though `filereaders.py` can read xlsx and docx (it does for uploads). Likely
-  real spec sheets and manuals: a "more crawl" opportunity, not built.
+- **Old Word and Excel files (`.doc` 181, `.xls` 120)** still fail as `bad_content_type`: no reader for the old
+  binary formats. A "more crawl" opportunity, not built.
+- **`tests/test_p14_search.py::test_a_search_inside_some_manuals_measures_every_distance_instead_of_walking_the_vector_index`
+  fails** (the plan has no `section_vectors_te3s_1536_hnsw`). It fails without the 2026-11-21 spreadsheet change too;
+  it reads the testing database's query plan, so it may depend on what that database holds. Not traced.

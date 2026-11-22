@@ -253,6 +253,8 @@ class _StartCrawl:
                     _rows(self.conn, "UPDATE pages SET extraction_status = 'skipped', page_count = 0 WHERE id = %s",
                           (page_id,))
                     links = feed_links(result.body, result.url)
+                elif library.EXTENSIONS.get(result.mime) in ("xlsx", "docx"):
+                    self._office(page_id, url, result.body, library.EXTENSIONS[result.mime])
                 else:
                     index_page(self.conn, page_id, result.body, is_pdf=result.is_pdf)
                     if result.is_pdf:
@@ -273,6 +275,32 @@ class _StartCrawl:
         if due and self.after_page is not None:
             self.after_page()  # once per page read, after its links are recorded, so a stop mid-run keeps them
         return attempted
+
+    def _office(self, page_id, url, body, file_type):
+        """A spreadsheet or Word file from a brand site, read like an upload (filereaders.py) and tagged like a PDF. A
+        price list is left out, as for uploads (2026-11-21: 479 .xlsx and 339 .docx had been thrown away)."""
+        from crawler.filereaders import extract as read_file, nothing_to_read
+        from crawler.sheets import SHEET_TYPES, price_sheet
+        from crawler.textextract import ExtractError
+        name = unquote(urlsplit(url).path.rsplit("/", 1)[-1])
+        if file_type in SHEET_TYPES and price_sheet(name):
+            _rows(self.conn, "UPDATE pages SET extraction_status = 'skipped', page_count = 0 WHERE id = %s", (page_id,))
+            return
+        try:
+            found = read_file(body, file_type)
+        except ExtractError as exc:
+            from crawler import issues
+            _rows(self.conn, "UPDATE pages SET extraction_status = 'failed' WHERE id = %s", (page_id,))
+            issues.record(self.conn, hashlib.sha256(body).hexdigest(), "unreadable",
+                          {"error": str(exc), "reader said": exc.detail, "bytes": len(body), "page_id": page_id,
+                           "file_type": file_type})
+            return
+        if nothing_to_read(found, file_type):
+            _rows(self.conn, "UPDATE pages SET extraction_status = 'skipped', page_count = 0 WHERE id = %s", (page_id,))
+            return
+        # is_pdf=True here means "a document the AI tags", as for uploads; found is given, so nothing is read again
+        index_page(self.conn, page_id, body, is_pdf=True, found=found)
+        record_pdf(self.conn, self.brand_id, page_id, url, body, file_type=file_type)
 
     def _search_form(self, url, body):
         """The first search form on each of the brand's hosts is kept for site search (P20, crawler/coverage.py)."""

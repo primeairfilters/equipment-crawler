@@ -53,7 +53,10 @@ def configured():
     return _bucket() is not None or _folder() is not None
 
 
-EXTENSIONS = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "html", "application/json": "json"}
+EXTENSIONS = {"application/pdf": "pdf", "text/html": "html", "application/xhtml+xml": "html", "application/json": "json",
+              # spreadsheets and Word files found on brand sites (fetch.OFFICE_TYPES, 2026-11-21)
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx"}
 TYPES = {"pdf": "application/pdf", "html": "text/html", "json": "application/json",
          "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "csv": "text/csv",
          "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

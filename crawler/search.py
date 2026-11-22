@@ -20,9 +20,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from crawler import ai
-from crawler.embed import DEFAULT_CAP_USD, MODEL, _vector_literal
+from crawler.embed import MODEL, _vector_literal
 from crawler.sections import terms
 from crawler.store import alias_key, model_key
+
+DEFAULT_CAP_USD = "50"  # the shared AI_MONTHLY_CAP_USD default: a question's embedding counts against it, unlike the
+# section embedding step, which has its own allowance (embed.EMBED_MONTHLY_USD)
 
 SEARCH_SQL = Path(__file__).with_name("search.sql").read_text()
 MIN_PREFIX = 5
