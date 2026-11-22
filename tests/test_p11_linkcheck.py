@@ -66,6 +66,24 @@ def test_suggested_skip_keywords_are_kept_for_the_user_and_never_switched_on(run
                            "AND (brand_id = %s OR brand_id IS NULL)", (brand_id,))[0][0] == 0
 
 
+def test_each_call_asks_few_enough_links_that_the_answer_fits(runtime_conn):
+    # Prod, November 2026: 60 links per call overran the 1,500-token answer limit on 28,131 of 32,738 calls; every
+    # one was billed, thrown away and asked again (5,145 pages, about 5.5 times each, $29.46 of the $50 cap).
+    # 40 tokens per link is a generous allowance for {"n", "crawl", "reason"} with a few-word reason.
+    from crawler.linkcheck import MAX_LINKS, MAX_TOKENS
+    assert MAX_LINKS * 40 + 100 <= MAX_TOKENS
+    name, brand_id = new_brand(runtime_conn)
+    many = [(f"https://www.ruud.com/range/{n}/", f"Model {n}") for n in range(60)]
+    fake = FakeLinkAI()
+    answers = checker(fake).check(runtime_conn, brand_id, None, CONTEXT, many)
+    assert len(answers) == 60 and all(len(call[3]) <= MAX_LINKS for call in fake.calls)
+
+
+def test_the_request_asks_for_a_short_reason():
+    from crawler.linkcheck import LINK_SYSTEM
+    assert "a few words" in LINK_SYSTEM
+
+
 def test_the_request_tells_the_model_that_page_text_is_data_not_instructions():
     from crawler.linkcheck import LINK_SYSTEM
     assert "data" in LINK_SYSTEM.lower() and "instruction" in LINK_SYSTEM.lower()

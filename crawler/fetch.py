@@ -21,7 +21,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 import httpx
 from protego import Protego
 
-from crawler import library
+from crawler import library, zendesk
 from crawler.hosts import in_scope, is_refused_host, normalize_host
 from crawler.netpolicy import is_public_ip
 from crawler.rules import is_pdf_link
@@ -73,6 +73,10 @@ class _Refused(Exception):
 
 class _ConnError(Exception):
     pass
+
+
+class _NoApi(Exception):
+    """The help-center API gave no usable article: the article page itself is fetched instead (crawler/zendesk.py)."""
 
 
 class _TooSlow(_ConnError):
@@ -477,14 +481,24 @@ class Fetcher:
         return Result("fetched", http_status=raw.status, body=raw.body, url=url)
 
     def fetch(self, url, brand_id, *, depth=0, start_url_id=None, parent_id=None, xml=False, kind=None):
-        """kind: 'page' (HTML or PDF), 'xml' (sitemaps) or 'json' (document feeds). xml=True is the older spelling."""
+        """kind: 'page' (HTML or PDF), 'xml' (sitemaps) or 'json' (document feeds). xml=True is the older spelling.
+        A help-center article page is asked for through the help-center API first (crawler/zendesk.py)."""
         kind = kind or ("xml" if xml else "page")
+        api = zendesk.article_api(urldefrag((url or "").strip())[0]) if kind == "page" else None
+        if api:
+            try:
+                return self._fetch(url, brand_id, depth, start_url_id, parent_id, kind, api)
+            except _NoApi:
+                pass
+        return self._fetch(url, brand_id, depth, start_url_id, parent_id, kind, None)
+
+    def _fetch(self, url, brand_id, depth, start_url_id, parent_id, kind, api):
         url = urldefrag((url or "").strip())[0]
         if len(url) > MAX_URL_LENGTH:
             return Result("refused", "url", url=url)
         approved = self._approved(brand_id)
         existing = self._page(brand_id, url)
-        current = url
+        current = api or url
         origin_host_id = None
         host_id = None
 
@@ -493,6 +507,8 @@ class Fetcher:
                                    parent_id)
 
         def failed(reason, status=None, host_failure=False):
+            if api:
+                raise _NoApi(reason)
             in_a_row = existing["fail_count"] if existing else 0  # a page that keeps failing is asked less often
             wait = min(RETRY_FAILED_AFTER * 2 ** min(in_a_row, 10), RETRY_FAILED_MAX)
             cols = {"next_check_at": self.now() + wait, "fetch_state": "failed", "fail_reason": reason[:40]}
@@ -517,7 +533,7 @@ class Fetcher:
                     self._exec("UPDATE hosts SET failure_count = 0, rest_until = NULL WHERE id = %s", (host_id,))
                 if not self._robots_allows(host_id, target, current, approved):
                     raise _Refused("robots")
-                if kind == "page" and row["use_browser"] and not current.lower().split("?")[0].endswith(".pdf"):
+                if kind == "page" and not api and row["use_browser"] and not current.lower().split("?")[0].endswith(".pdf"):
                     raw, final = self._render(host_id, current, approved)
                     if raw.status in range(200, 300) and not raw.headers.get("content-type", "").startswith("text/html"):
                         raw = self._get(host_id, target, {}, _body_limit)  # not a web page after all: plain HTTP
@@ -537,9 +553,14 @@ class Fetcher:
                             conditional["If-None-Match"] = existing["etag"]
                         if existing["last_modified"]:
                             conditional["If-Modified-Since"] = existing["last_modified"]
-                    limit = _pdf_address_limit if kind == "page" and is_pdf_link(current) else LIMITS[kind]
+                    if api:
+                        limit = _json_body_limit
+                    else:
+                        limit = _pdf_address_limit if kind == "page" and is_pdf_link(current) else LIMITS[kind]
                     raw = self._get(host_id, target, conditional, limit)
             except _Refused as refused:
+                if api:
+                    raise _NoApi(refused.reason)
                 return Result("refused", refused.reason, url=current)
             except _TooSlow:
                 return failed("too_slow")
@@ -554,6 +575,8 @@ class Fetcher:
                 continue
 
             now = self.now()
+            if api:
+                current = url  # the article is kept under its own address, not the API's
             if raw.status == 304 and conditional:
                 page_id = save({"fetched_at": now, "next_check_at": now + RECHECK_AFTER, "fail_count": 0,
                                 "fail_reason": None, "fetch_state": "fetched", "final_url": current})
@@ -566,18 +589,25 @@ class Fetcher:
                 return failed("too_big", raw.status)
             if raw.body is None:
                 return failed("bad_content_type", raw.status)
+            if api:
+                html = zendesk.article_html(raw.body)
+                if html is None:
+                    raise _NoApi("not_an_article")
+                raw = raw._replace(body=html)
 
-            is_pdf = kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES
+            is_pdf = not api and (kind_of(raw.headers) == "application/pdf" or kind_of(raw.headers) in OCTET_TYPES)
             if is_pdf and not raw.body.startswith(b"%PDF-"):
                 return failed("not_pdf", raw.status)
             if not is_pdf and self._pdf_only(brand_id, target.host):  # a host the crawler approved gives PDFs only (P18)
                 return failed("pdf_only_host", raw.status)
             mime = "application/pdf" if is_pdf else kind_of(raw.headers)  # octet-stream PDFs are kept as PDFs
+            if api:
+                mime = "text/html"  # the article as a small web page (crawler/zendesk.py)
 
             sha = hashlib.sha256(raw.body).hexdigest()
             cols = {
                 "http_status": raw.status,
-                "content_type": raw.headers.get("content-type", "")[:190],
+                "content_type": "text/html; charset=utf-8" if api else raw.headers.get("content-type", "")[:190],
                 "etag": (raw.headers.get("etag") or None) and raw.headers.get("etag")[:255],
                 "last_modified": (raw.headers.get("last-modified") or None) and raw.headers.get("last-modified")[:100],
                 "content_sha": sha,
