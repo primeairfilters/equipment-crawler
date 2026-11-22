@@ -1,8 +1,10 @@
-"""Gap-fill: a targeted web search for ENERGY STAR models that still have no document (D15).
+"""Gap-fill: a targeted web search for ENERGY STAR models that still have no document (D15), then for models the
+crawler found in its own documents that still have no install or service manual (2026-11-21: 31,365 of 42,077 such
+models on prod were only in spec sheets, parts lists or brochures).
 
-One search per model family, limited to the brand's approved hosts, after a free check of the text we
-already hold. At most 200 searches a month; a search that finds nothing is not repeated for 6 months.
-Nothing here commits unless the caller does.
+One search per model family, limited to the brand's approved hosts. ENERGY STAR families get a free check of the text
+we already hold first; a found family is in that text by definition, so it has none. At most 2,000 searches a month;
+a search that finds nothing is not repeated for 6 months. Nothing here commits unless the caller does.
 """
 import os
 import re
@@ -14,11 +16,13 @@ from crawler.brands import UnknownTarget, find_brand
 from crawler.db import try_lock, unlock
 from crawler.discover import _clean_url
 from crawler.hosts import in_scope
-from crawler.store import HAS_NO_DOCUMENT_SQL, alias_key
+from crawler.store import HAS_NO_DOCUMENT_SQL, HAS_NO_MANUAL_SQL, alias_key
 
 import hashlib
 
-MAX_SEARCHES_PER_MONTH = 200
+MAX_SEARCHES_PER_MONTH = 2000  # about a penny each (200 cost $2.29 in Nov 2026); the dollar cap still holds
+WANT_ANY = "spec sheet or installation manual"
+WANT_MANUAL = "installation manual or service manual"
 MAX_TOKENS = 4000
 ASSUMED_INPUT_TOKENS = 60_000
 MISS_BACKOFF = timedelta(days=180)
@@ -112,7 +116,16 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             listed = dict(_rows(conn, "SELECT family, min(category) FROM public_models WHERE brand_id = %s GROUP BY family",
                                 (brand_id,)))
             keys = [k for k in keys if in_trades(listed.get(family(k)), trades)]
-        for fam in sorted({family(k) for k in keys}):
+        listed_families = {family(k) for k in keys}
+        found_families = {family(r[0]) for r in _rows(  # found in our documents, with no manual; in the brand's trades
+            conn,
+            "SELECT em.model_key FROM models em WHERE NOT em.energy_star_confirmed AND em.hidden_at IS NULL "
+            "AND em.manufacturer_id IN (SELECT id FROM manufacturers WHERE name_key = %s UNION "
+            " SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s) "
+            "AND (cardinality(%s::text[]) = 0 OR em.trade = ANY (%s::text[])) AND " + HAS_NO_MANUAL_SQL,
+            (alias_key(brand_name), alias_key(brand_name), sorted(trades), sorted(trades)))}
+        work = [(f, True) for f in sorted(listed_families)] + [(f, False) for f in sorted(found_families - listed_families)]
+        for fam, listed_family in work:
             from crawler.clock import time_up
             if used >= max_searches or (limit is not None and summary["searched"] >= limit) or time_up():
                 return summary
@@ -121,12 +134,13 @@ def _gap_fill(conn, client, *, brand=None, now=None, cap_usd=None, max_searches=
             if last and now - last[0][0] < MISS_BACKOFF:
                 summary["backed_off"] += 1
                 continue
-            if _holds_text(conn, fam):
+            if listed_family and _holds_text(conn, fam):
                 summary["held_text"] += 1
                 continue
             if model is None:
                 model = ai.HAIKU if client.supports_web_search(ai.HAIKU) else ai.SONNET
-            done = _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now)
+            done = _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now,
+                           want=WANT_ANY if listed_family else WANT_MANUAL)
             if done is None:
                 return summary
             used += done[1]
@@ -152,14 +166,14 @@ def search_family(conn, client, brand_id, fam, *, now=None, cap_usd=None, purpos
     return None if done is None else done[0]
 
 
-def _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now, purpose="gapfill"):
+def _search(conn, client, model, brand_id, brand_name, fam, hosts, cap, now, purpose="gapfill", want=WANT_ANY):
     """(documents queued, searches used) for one family, or None at the monthly cap."""
     worst = ai.cost(model, input_tokens=ASSUMED_INPUT_TOKENS, output_tokens=MAX_TOKENS, searches=1)
     reserved = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages "
                              "WHERE ai_batch_id IS NOT NULL")[0][0])
     if ai.monthly_spend(conn, now) + reserved + worst > cap:
         return None
-    query = f"{brand_name} {fam} spec sheet or installation manual"
+    query = f"{brand_name} {fam} {want}"
     reply = client.find_documents(model, brand_name, query, hosts, 1, MAX_TOKENS)
     answer = reply.output if isinstance(reply.output, dict) else None
     _exec(conn,

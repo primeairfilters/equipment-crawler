@@ -5,7 +5,7 @@ Decided by D15 and tested here:
 - the worklist comes only from ENERGY STAR models (energy_star_confirmed) of a TRACKED brand that have no specs;
 - one search per model family (family = the first 6 characters of the model key), not per model;
 - a free check first: if text we already stored mentions the family, no paid search is made for it;
-- at most 200 searches a month, counted from ai_calls (purpose 'gapfill', column searches);
+- at most 2,000 searches a month, counted from ai_calls (purpose 'gapfill', column searches);
 - a search that found nothing is not repeated for 6 months, one that found documents not for 30 days;
 - the search is limited to the brand's approved hosts, one search per call (max_uses 1);
 - the search text holds the brand name and the family only, never full model numbers.
@@ -74,9 +74,56 @@ def test_family_is_the_first_six_characters(key, family):
     assert family_of(key) == family
 
 
-def test_the_limit_is_200_searches_a_month():
+def test_the_limit_is_2000_searches_a_month():
+    # 2026-11-21: 200 searches cost $2.29 in November; at 200 the 16,335 ENERGY STAR models with no document, and the
+    # models found only in spec sheets, would take years.
     from crawler.gapfill import MAX_SEARCHES_PER_MONTH
-    assert MAX_SEARCHES_PER_MONTH == 200
+    assert MAX_SEARCHES_PER_MONTH == 2000
+
+
+# ---------------------------------------------------------------- models found in documents, with no manual
+
+def found_in_docs(conn, name, key, doc_type, trade=None):
+    """A model the crawler found in one of its documents (not ENERGY STAR), and that document's page text."""
+    from p3support import linked_doc
+    linked_doc(conn, name, key, doc_type)
+    if trade:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE models SET trade = %s WHERE model_key = %s", (trade, key))
+
+
+def test_a_model_found_only_in_a_spec_sheet_is_searched_for_its_manual(runtime_conn):
+    f = fam("S")
+    name, brand_id = tracked(runtime_conn, [])
+    found_in_docs(runtime_conn, name, model(f), "spec_sheet")
+    make_doc(runtime_conn, brand_id, [f"Spec sheet for {model(f)}"])  # the text it was found in: no free skip for it
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    assert len(fake.searches()) == 1
+    query = fake.searches()[0][3]
+    assert f in query and "manual" in query and "spec sheet" not in query
+
+
+def test_a_model_with_an_install_or_service_manual_is_not_searched(runtime_conn):
+    a, b = fam("I"), fam("V")
+    name, brand_id = tracked(runtime_conn, [])
+    found_in_docs(runtime_conn, name, model(a), "install_manual")
+    found_in_docs(runtime_conn, name, model(b), "service_manual")
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    assert fake.searches() == []
+
+
+def test_a_found_model_outside_the_brands_trades_is_not_searched(runtime_conn):
+    keep, other = fam("K"), fam("O")
+    name, brand_id = tracked(runtime_conn, [])
+    with runtime_conn.cursor() as cur:
+        cur.execute("UPDATE brands SET trades = ARRAY['hvac'] WHERE id = %s", (brand_id,))
+    found_in_docs(runtime_conn, name, model(keep), "brochure", trade="hvac")
+    found_in_docs(runtime_conn, name, model(other), "brochure", trade="plumbing")
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    assert [keep in s[3] for s in fake.searches()] == [True]
 
 
 # ---------------------------------------------------------------- what is searched, and how
@@ -211,12 +258,14 @@ def test_the_monthly_search_limit_holds_and_the_rest_wait_for_next_month(runtime
 
 
 def test_searches_already_used_this_month_count_against_the_limit(runtime_conn):
+    from crawler.gapfill import MAX_SEARCHES_PER_MONTH
     name, brand_id, families = five_families(runtime_conn)
     with runtime_conn.cursor() as cur:
         cur.execute("INSERT INTO ai_calls (purpose, brand_id, model, searches, cost_usd, created_at) "
-                    "VALUES ('gapfill', %s, %s, 198, 1.98, %s)", (brand_id, HAIKU, "2031-05-02 10:00:00"))
+                    "VALUES ('gapfill', %s, %s, %s, 1.98, %s)", (brand_id, HAIKU, MAX_SEARCHES_PER_MONTH - 2,
+                                                                 "2031-05-02 10:00:00"))
     fake = FakeGapAI()
-    run(runtime_conn, fake, name)  # default limit of 200
+    run(runtime_conn, fake, name)  # the default monthly limit
     assert len(fake.searches()) == 2
 
 

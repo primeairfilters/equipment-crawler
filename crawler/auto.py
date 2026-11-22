@@ -283,7 +283,7 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     return summary
 
 
-GAP_SEARCHES_PER_RUN = 20  # per brand per night; gapfill's monthly cap (200) and the AI cap hold too
+GAP_SEARCHES_PER_RUN = 20  # per brand per night; gapfill's monthly cap (2,000) and the AI cap hold too
 
 
 def _coverage(conn, fetcher, client, brand_id, name, first_document, run_id, now, commit):

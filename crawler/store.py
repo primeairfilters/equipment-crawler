@@ -12,6 +12,14 @@ HAS_NO_DOCUMENT_SQL = (
     "AND left(em.model_key, length(dm.model_key)) = dm.model_key "
     "AND d.doc_type IS NOT NULL AND d.doc_type <> 'not_equipment')"
 )
+# The same rule for "has a manual": only an install or service manual covers the model; a spec sheet, parts list or
+# brochure alone does not (gap-fill, 2026-11-21).
+HAS_NO_MANUAL_SQL = (
+    "NOT EXISTS (SELECT 1 FROM document_models dm JOIN documents d ON d.id = dm.document_id "
+    "WHERE dm.manufacturer_id = em.manufacturer_id AND length(dm.model_key) >= 5 "
+    "AND left(em.model_key, length(dm.model_key)) = dm.model_key "
+    "AND d.doc_type IN ('install_manual', 'service_manual') AND d.hidden_at IS NULL)"
+)
 
 ALLOWED_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5")
 _DROP_WORDS = {"SALES", "COMPANY", "CO", "INC", "LLC", "CORP", "CORPORATION", "MFG", "MANUFACTURING"}

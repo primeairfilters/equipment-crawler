@@ -3,7 +3,7 @@
 A model is covered when its manufacturer has a document (a documents row with doc_type set) linked to a model
 whose key is equal to it or is a prefix of it at least 5 characters long. A 4-character prefix, a document with no
 doc_type, a key that is not a prefix, and another manufacturer's document do not cover it. Spec rows no longer count.
-The search, the 200 a month limit and the 180-day back-off are unchanged (test_p5_gapfill.py).
+The search, the monthly limit and the 180-day back-off are unchanged (test_p5_gapfill.py).
 """
 import pytest
 
