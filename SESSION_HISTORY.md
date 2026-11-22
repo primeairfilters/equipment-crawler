@@ -261,3 +261,13 @@ AirStage is `crawled` (12:52 UTC): 137 pages fetched, 0 failed this run, 0 PDFs.
 wait for the link check, which is now capped. Trane is not reached yet: 0 pages this run, and its help center is
 still 1 fetched / 2,494 failed. Unembedded sections rose to 13,439 of 305,790 because new sections were built. They
 get embedded at the end of the run, from the $1.20 left of the embedding $5.
+
+### The missing-manual search rarely ends in a manual (prod, 2026-11-22)
+
+Of 365 gap-fill searches (2026-10-31 to 11-22), 115 returned at least one link. For 18 of those, an install or
+service manual naming a model in that family (first 6 characters of the key) arrived afterwards. Of the 50 with links
+from before Nov 8, which had the most time to be crawled, 7 did (14%). Gap-fill start pages: 1,048 active (909
+fetched, 27 of them PDFs), 411 stopped (none fetched). For the motto, this is the weakest link between a Breeze miss and
+a fix: most searches buy nothing. Worth finding out why: wrong pages, pages that only lead to PDFs that are never
+reached, or manuals that arrive but aren't tied to the family because tagging was capped after Nov 11. Also, a sorted
+miss is never looked at again (`misses.py`), so nothing notices when a later crawl answers it.

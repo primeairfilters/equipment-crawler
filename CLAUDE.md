@@ -1,5 +1,16 @@
 # CLAUDE.md
 
+## The goal above the theme: the circle that ends at Live Camera
+
+**The crawler is step 1 of a circle** (the user, 2026-11-22): the crawler collects documents → RAG reads, sections,
+tags, embeds and searches them → Live Camera and Breeze use them to help the person at the unit → what Live Camera
+learns (misses, wrong answers, pages a live web search found, brands it didn't know) feeds back to the crawler. **The
+Live Camera/Breeze user's experience is the goal; every crawler and RAG change is judged by what it does for that
+person's answer**, not by pages, coverage or cost alone. Two users: company techs (fast, exact answers) and Tech Support
+users (inexperienced, need plain step-by-step help). Every decision, test result and parked item from that discussion
+is in the HVACApp project memory, `~/.claude/projects/-Users-cesarbielich-Documents-repos-HVACApp/memory/project_live_camera_pipeline_goal.md`.
+Read it before crawler, RAG or Live Camera work.
+
 ## The theme: more crawl, faster, efficient, accurate — lower AI cost
 
 **This is the main theme of the crawler, and it drives every decision made while working on it** (the user,
