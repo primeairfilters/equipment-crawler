@@ -25,6 +25,10 @@ PROMPT_TOKEN_LIMIT = 100_000
 SPLIT_TARGET_TOKENS = 95_000
 DEFAULT_MAX_TOKENS = 16000  # 2026-11-08: was 4000; Evapco spec sheets and a coil spreadsheet list hundreds of models
 # and their answers were cut there (prod: 12 of 9,136 calls). Paid only as used; the reserve against the cap grows a little
+# The money set aside per request while its batch is out: the batch price of a realistic answer, not of max_tokens at
+# full price (prod to 2026-11-21: answers 109 tokens median, 720 at the 99th percentile, 6,156 at most). A rare answer
+# longer than this goes over by at most (max_tokens - this) at $0.25 per million, a fraction of a cent.
+RESERVE_OUTPUT_TOKENS = 2000
 DEFAULT_CAP_USD = "50"
 RETRY_AFTER = timedelta(days=1)
 
@@ -416,7 +420,8 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
                   (EXTRACTOR_VERSION, page_id))
             summary["skipped"] += 1
             continue
-        reserve = sum(ai.cost(model, input_tokens=tokens, output_tokens=max_tokens, check_long=True) for _, tokens in plan)
+        reserve = sum(ai.cost(model, input_tokens=tokens, output_tokens=min(max_tokens, RESERVE_OUTPUT_TOKENS), batch=True,
+                              check_long=True) for _, tokens in plan)
         if reserve > room:
             summary["held"] += 1
             continue

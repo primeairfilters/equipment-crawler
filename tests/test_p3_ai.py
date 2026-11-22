@@ -240,6 +240,27 @@ def test_the_monthly_cap_holds_a_batch_that_could_go_over(runtime_conn):
     assert 0 < dec(spent) <= cap
 
 
+# Prod, all 17,679 tagging calls to 2026-11-21: answers were 109 tokens at the median, 720 at the 99th percentile, 6,156
+# at most. The set-aside assumed all 16,000 at the full (not batch) price, about 22 times too much, and every other paid
+# step counts it against the cap while a batch is out.
+
+def test_the_money_set_aside_is_the_batch_price_of_a_realistic_answer(runtime_conn):
+    from crawler import ai
+    from crawler.extract import RESERVE_OUTPUT_TOKENS, extract_pass
+    name, pages, fake = three_docs(runtime_conn)
+    extract_pass(runtime_conn, fake, brand=name, cap_usd=Decimal("100"))  # submits; the answers come on a later pass
+    one = ai.cost(HAIKU, input_tokens=60_000, output_tokens=RESERVE_OUTPUT_TOKENS, batch=True, check_long=True)
+    reserved = [dec(q(runtime_conn, "SELECT ai_reserved_usd FROM pages WHERE id = %s", (p,))[0][0]) for p in pages]
+    assert reserved == [one.quantize(Decimal("0.000001"))] * 3
+
+
+def test_a_document_that_fits_at_the_batch_price_is_no_longer_held(runtime_conn):
+    name, pages, fake = three_docs(runtime_conn)
+    # one document: about $0.0035 set aside now, $0.014 before (60k in and 16,000 out at the full price)
+    settle(runtime_conn, fake, name, cap_usd=Decimal("0.005"))
+    assert len(fake.requests) == 1
+
+
 def test_a_cap_too_small_for_even_one_request_sends_nothing_and_does_not_fail(runtime_conn):
     name, pages, fake = three_docs(runtime_conn)
     settle(runtime_conn, fake, name, cap_usd=Decimal("0.001"), max_tokens=4096)
