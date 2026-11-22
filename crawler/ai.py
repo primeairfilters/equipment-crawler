@@ -98,13 +98,16 @@ def cost(model, input_tokens=0, output_tokens=0, batch=False, searches=0, check_
     return total + SEARCH_PRICE * searches
 
 
-def monthly_spend(conn, now):
-    """Everything logged in ai_calls during the calendar month of `now`."""
+def monthly_spend(conn, now, purpose=None):
+    """What ai_calls logged during the calendar month of `now`, against the shared cap: everything but the section
+    embedding ('embed'), which has its own monthly allowance (embed.EMBED_MONTHLY_USD, the user 2026-11-21). With a
+    purpose, only that purpose."""
     start = datetime(now.year, now.month, 1)
     end = datetime(now.year + (now.month == 12), now.month % 12 + 1, 1)
     with conn.cursor() as cur:
-        cur.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE created_at >= %s AND created_at < %s",
-                    (start, end))
+        cur.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM ai_calls WHERE created_at >= %s AND created_at < %s AND "
+                    + ("purpose = %s" if purpose else "purpose <> 'embed'"),
+                    (start, end, purpose) if purpose else (start, end))
         return Decimal(cur.fetchone()[0])
 
 

@@ -20,7 +20,8 @@ again (pages due, batches out, sections and vectors missing are all read back fr
 finishes what an interrupted one left.
 
 Paid steps (the AI link check and tagging) stop for a brand that has spent its monthly budget (brands.monthly_budget_usd,
-$5 by default, Q25); the monthly cap (AI_MONTHLY_CAP_USD) still holds for everything. Free steps always run. A
+$5 by default, Q25); the monthly cap (AI_MONTHLY_CAP_USD) holds for everything but section embedding, which has its
+own $5 a month (embed.EMBED_MONTHLY_USD). Free steps always run. A
 stopped brand (`./crawl stop`, the admin page's pause) is skipped. One step failing is reported and the run goes on.
 """
 import json

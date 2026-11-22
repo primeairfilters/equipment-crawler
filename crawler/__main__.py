@@ -391,8 +391,7 @@ def main(argv):
                           f"({summary['tokens']} tokens, ${summary['cost']:.6f}); {summary['reused']} reused a vector "
                           "for the same text.")
                     if summary["capped"]:
-                        print("Stopped at the monthly AI cap (AI_MONTHLY_CAP_USD); the rest wait for next month or a "
-                              "higher cap.")
+                        print("Stopped at embedding's own $5 a month; the rest wait for next month.")
                     if summary["error"]:
                         print(f"Stopped: {summary['error']}. What was done is kept; run it again to go on.")
             elif args.command in ("ask", "eval"):

@@ -6,8 +6,10 @@
   MAX_INPUT_TOKENS: garbled Arabic (presentation forms, U+FFFD) ran over 8,192 tokens in 5,031 characters.
 - Never paid twice: a section whose exact text already has a vector (a rebuild that changed nothing) copies it.
 - Direct calls to the embeddings API (user, 2026-10-27), up to MAX_INPUTS_PER_REQUEST sections or
-  MAX_TOKENS_PER_REQUEST tokens a request; each request is logged in ai_calls and counted in the same monthly cap as
-  the Anthropic spend, checked before it is sent.
+  MAX_TOKENS_PER_REQUEST tokens a request; each request is logged in ai_calls and counted against embedding's own
+  monthly allowance (EMBED_MONTHLY_USD), checked before it is sent. It is outside the shared AI_MONTHLY_CAP_USD, so
+  sections already paid to tag are always made searchable (the user, 2026-11-21: 48,201 sat unembedded for want of
+  about 40 cents after the shared cap ran out).
 
 The key is read from the environment only (OPENAI_API_KEY_CRAWLER) and is never printed or logged. Callers commit;
 after_request runs after each request's rows are written.
@@ -25,7 +27,7 @@ TABLE = "section_vectors_te3s_1536"
 MAX_INPUTS_PER_REQUEST = 100
 MAX_TOKENS_PER_REQUEST = 60_000
 MAX_INPUT_TOKENS = 8_000  # the model reads at most 8,192 tokens an input; the estimate below is on the high side
-DEFAULT_CAP_USD = "50"
+EMBED_MONTHLY_USD = Decimal("5")  # on top of the shared cap; November 2026 used $3.30
 
 
 class EmbedError(Exception):
@@ -103,7 +105,7 @@ def embed_pass(conn, client, *, brand_id=None, cap_usd=None, now=None, after_req
     """Give every live section without a vector one. Returns {"embedded", "reused", "requests", "tokens", "cost",
     "capped", "error"}."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
-    cap = Decimal(str(cap_usd if cap_usd is not None else os.environ.get("AI_MONTHLY_CAP_USD", DEFAULT_CAP_USD)))
+    cap = Decimal(str(cap_usd)) if cap_usd is not None else EMBED_MONTHLY_USD  # cap_usd: this pass's allowance
     todo = _rows(conn,
                  "SELECT s.id, m.name, s.doc_type, d.title, s.heading_path, s.page_from, s.page_to, s.body "
                  "FROM sections s JOIN documents d ON d.id = s.document_id "
@@ -144,7 +146,7 @@ def embed_pass(conn, client, *, brand_id=None, cap_usd=None, now=None, after_req
         if time_up():  # P24: 6 AM; the sections without vectors are still due tomorrow
             break
         worst = ai.cost(MODEL, sum(_estimate(text) for _, text, _ in group))
-        if ai.monthly_spend(conn, now) + worst > cap:
+        if ai.monthly_spend(conn, now, purpose="embed") + worst > cap:
             summary["capped"] = True
             break
         try:

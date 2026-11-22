@@ -100,13 +100,36 @@ def test_each_request_is_logged_with_its_cost(runtime_conn, monkeypatch):
     assert rows == (("embed", "text-embedding-3-small", billed, price),)
 
 
-def test_the_monthly_cap_holds(runtime_conn, monkeypatch):
+# 2026-11-21 (the user): embedding has its own $5 a month, on top of the $50 cap. Prod: 48,201 live sections (about
+# 40 cents of embedding) sat without vectors from Nov 11-14, after the shared cap ran out.
+
+def test_embedding_stops_at_its_own_monthly_allowance(runtime_conn, monkeypatch):
+    from crawler.embed import EMBED_MONTHLY_USD, embed_pass
+    assert EMBED_MONTHLY_USD == Decimal("5")
+    doc, _, _ = live_document(runtime_conn, monkeypatch)
+    q(runtime_conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('embed', 'text-embedding-3-small', 4.9999999)")
+    client = FakeEmbedder()
+    summary = embed_pass(runtime_conn, client)
+    assert client.calls == [] and summary["capped"] and vectors(runtime_conn, doc) == ()
+
+
+def test_other_ai_spend_over_the_cap_does_not_stop_embedding(runtime_conn, monkeypatch):
     from crawler.embed import embed_pass
     doc, _, _ = live_document(runtime_conn, monkeypatch)
-    q(runtime_conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('tag', 'claude-haiku-5-5', 4.9999999)")
+    q(runtime_conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('extract', 'claude-haiku-5-5', 1000)")
     client = FakeEmbedder()
-    summary = embed_pass(runtime_conn, client, cap_usd=5)
-    assert client.calls == [] and summary["capped"] and vectors(runtime_conn, doc) == ()
+    summary = embed_pass(runtime_conn, client)
+    assert not summary["capped"] and len(client.calls) == 1 and vectors(runtime_conn, doc) != ()
+
+
+def test_embedding_does_not_count_against_the_shared_cap(runtime_conn):
+    from datetime import datetime, timezone
+    from crawler import ai
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    before = ai.monthly_spend(runtime_conn, now)
+    q(runtime_conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('embed', 'text-embedding-3-small', 3)")
+    q(runtime_conn, "INSERT INTO ai_calls (purpose, model, cost_usd) VALUES ('extract', 'claude-haiku-5-5', 2)")
+    assert ai.monthly_spend(runtime_conn, now) == before + 2
 
 
 def test_requests_are_split_so_one_stays_small(runtime_conn, monkeypatch):
