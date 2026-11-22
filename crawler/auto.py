@@ -136,8 +136,10 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0,
                                                                                  "rejected": 0}
         retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
-        from crawler.known_models import link_known_models  # free: manuals with no models get the known ones they print
+        from crawler.known_models import link_known_models, link_sister_brand_models  # free, no AI
         summary["models_linked"] = step("linking known models to manuals", lambda: link_known_models(conn)) or 0
+        # a model a sister brand also sells is linked under that brand too (Rheem/Ruud, Carrier/Bryant/Payne)
+        summary["sister_models_linked"] = step("linking sister-brand models", lambda: link_sister_brand_models(conn)) or 0
         step("parse issue list", lambda: _report_if_stale(conn, commit))
         vectors("embedding what last night built")
         return retried

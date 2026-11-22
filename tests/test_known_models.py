@@ -66,6 +66,48 @@ def test_a_spec_sheet_is_not_looked_at(runtime_conn):
     assert run(runtime_conn) == 0 and linked(runtime_conn, doc) == []
 
 
+# Sister brands (2026-11-21): a Bryant manual printing a Payne model number left the Payne model looking uncovered, and
+# Breeze, asked about a Payne unit, missed it in the model and brand lookups and marked it down as another brand's.
+# On prod, with keys of 8+ characters, every pair was a real family (Rheem/Ruud/Friedrich, Carrier/Bryant/Payne/Midea,
+# Trane/American Standard, York/Johnson Controls/Coleman/Luxaire, ...): 2,487 links over 307 manuals.
+
+def sister_link(conn, filed_brand_models, sister_numbers):
+    name, doc = manual(conn, ["Units: " + " ".join(filed_brand_models)], models=filed_brand_models)
+    sister, _ = new_brand(conn)
+    known(conn, sister, *sister_numbers)
+    from crawler.store import manufacturer_for
+    return doc, manufacturer_for(conn, sister)
+
+
+def test_a_model_a_sister_brand_also_sells_is_linked_under_that_brand_too(runtime_conn):
+    from crawler.known_models import link_sister_brand_models
+    doc, sister = sister_link(runtime_conn, ("PA14NA024000",), ("PA14NA024000",))
+    assert link_sister_brand_models(runtime_conn) >= 1
+    assert q(runtime_conn, "SELECT model_key FROM document_models WHERE document_id = %s AND manufacturer_id = %s",
+             (doc, sister)) == (("PA14NA024000",),)
+    assert q(runtime_conn, "SELECT 1 FROM document_brands WHERE document_id = %s AND manufacturer_id = %s",
+             (doc, sister)) == ((1,),)
+    from crawler.search import model_documents
+    assert doc in model_documents(runtime_conn, "PA14NA024000", sister)  # Breeze's model lookup finds it now
+
+
+def test_a_short_shared_number_is_not_taken_as_the_same_unit(runtime_conn):
+    from crawler.known_models import link_sister_brand_models
+    doc, sister = sister_link(runtime_conn, ("AC1000",), ("AC1000",))
+    link_sister_brand_models(runtime_conn)
+    assert q(runtime_conn, "SELECT 1 FROM document_models WHERE document_id = %s AND manufacturer_id = %s",
+             (doc, sister)) == ()
+
+
+def test_linking_sister_brands_twice_adds_nothing_the_second_time(runtime_conn):
+    from crawler.known_models import link_sister_brand_models
+    doc, sister = sister_link(runtime_conn, ("PA14NA036000",), ("PA14NA036000",))
+    link_sister_brand_models(runtime_conn)
+    before = q(runtime_conn, "SELECT COUNT(*) FROM document_models WHERE document_id = %s", (doc,))[0][0]
+    link_sister_brand_models(runtime_conn)
+    assert q(runtime_conn, "SELECT COUNT(*) FROM document_models WHERE document_id = %s", (doc,))[0][0] == before
+
+
 def test_a_manual_is_looked_at_again_only_after_30_days(runtime_conn):
     name, doc = manual(runtime_conn, ["Units: RA15AZ24AJ3CA"])
     run(runtime_conn)  # nothing known yet

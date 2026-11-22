@@ -150,23 +150,46 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   removing a name, import every module (`python -c "import pkgutil, importlib, crawler; ..."`) and run the tests of
   every file that imported it, not only the changed file's tests.
 
+- **77 waiting sites approved by the user** on prod with `./crawl ok <host>` (no `--brand`: approves the host for
+  every brand that found it), confirmed by a read-only query: 77 approved, 0 of them still waiting. Among them
+  `files.hvacnavigator.com` (York, Coleman), `www.meppi.com` (Mitsubishi Electric), `literature.nortekhvac.com`.
+  **27 were left waiting on purpose**: stores, distributors and dealer sites (Lowe's, Home Depot's image server,
+  Wesco, `asdealernet.com`, `resource.ecmdi.com` and more), Dropbox, Scribd, `shareddocs.com`, and shared hosting that
+  serves thousands of companies (`s3.amazonaws.com`, `cdn.prod.website-files.com`, HubSpot's file server, Adobe's
+  scene7), in line with `hostjudge.BLOCKLIST`. Lesson for pasting long commands into the server: the terminal wraps
+  long lines and indents pasted lines, which breaks a `for` loop and a heredoc; one short `./crawl ok <host>` per line
+  works.
+- **Fujitsu's site moved to `www.airstagehvac.com`** (product pages answer 308 to the same path there). The user added
+  `https://www.airstagehvac.com/us/` for brand Fujitsu on the Hosts tab; the next run's sync makes it a start page and
+  approves the site (`control.take_start_pages`). Check after the next run that Fujitsu pages and PDFs come in.
+
+- **Sister-brand models linked across brands** (`known_models.link_sister_brand_models`, nightly). A model a sister
+  brand also sells, by the exact same model key of 8+ characters, is linked to the manual under that brand too, and
+  the brand is added to the manual's `document_brands`. Why it mattered for Live Camera: Breeze, asked about a Payne
+  unit, looked for documents filed under Payne only (`modelDocuments` and `brandDocuments` in HVACApp's
+  `EquipmentKnowledgeSearch.php`), missed the Bryant manual that prints the number, and marked it down as another
+  brand's (`FOREIGN_CODE`) when the whole-library search found it. On prod: 315 ENERGY STAR models looked uncovered
+  this way; with 8+ characters every brand pair was a real family (Rheem/Ruud/Friedrich, Carrier/Bryant/Payne/Midea
+  and the ICP brands, Trane/American Standard, York/Johnson Controls/Coleman/Luxaire, Nortek's brands, Bradford
+  White/Laars), 2,487 links over 307 manuals and 1,052 models. Data only: no Breeze change needed.
+
 ### Still open from 2026-11-21
 
-- **Fujitsu's whole site moved to `www.airstagehvac.com`**, not just its robots.txt: product pages answer 308 there
-  (`/us/products/split/floor/agu15rlff.html` → the same path on airstagehvac.com, checked 2026-11-21). The crawler
-  refuses a redirect to a site not approved, so Fujitsu stays blocked until `www.airstagehvac.com` is approved for
-  Fujitsu in /admin. Check Nortek's `literature.nordyne.com` the same way.
-- **125 sites wait for approval** in /admin across 77 brands, including `files.hvacnavigator.com` (York, Coleman),
-  `www.meppi.com` (Mitsubishi Electric) and `www.asdealernet.com` (American Standard). No code needed.
+- **After the next runs:** check the Fujitsu/AirStage page went from `waiting` to crawled
+  (`control.start_page_status`), the link check's `rejected` share is near 0, Trane articles arrive through the
+  help-center API, and the 48,201 unembedded sections got vectors.
+- **Nortek's `literature.nortekhvac.com`** redirects to `literature.nordyne.com`; check whether its pages moved like
+  Fujitsu's (if so, approve `literature.nordyne.com`).
 - Eaton and Baldor time out even from a desktop with the crawler's honest name: bot blocking, nothing honest to fix.
 - `www.www.nortekair.com` and `www.www.lennoxpros.com` are typo hosts from discovery.
-- 315 ENERGY STAR models look uncovered under their own brand but appear under a sister brand (models are filed
-  under the crawling brand, `store.py` `page_manufacturer`).
+- Model numbers shorter than 8 characters shared by two brands (1,225 links on prod) are not linked across brands:
+  some may be sister brands, some chance. Not checked.
 - Smaller leads from the code review, not yet checked on prod: a big backlog sent as one batch could pass the Batch
   API size limit; token counting runs before the cap check; a sheet over 95k tokens is skipped silently; any edit to
   `textextract.py` rebuilds every document's sections; scanned PDFs whose OCR failed are never retried.
 - **Old Word and Excel files (`.doc` 181, `.xls` 120)** still fail as `bad_content_type`: no reader for the old
   binary formats. A "more crawl" opportunity, not built.
 - **`tests/test_p14_search.py::test_a_search_inside_some_manuals_measures_every_distance_instead_of_walking_the_vector_index`
-  fails** (the plan has no `section_vectors_te3s_1536_hnsw`). It fails without the 2026-11-21 spreadsheet change too;
-  it reads the testing database's query plan, so it may depend on what that database holds. Not traced.
+  is flaky:** it failed twice on 2026-11-21 (the plan had no `section_vectors_te3s_1536_hnsw`) and passed in a later
+  run with no change to search. It reads the testing database's query plan, which depends on what that database holds
+  at the time. Do not read a failure of it as a broken search without running it again.

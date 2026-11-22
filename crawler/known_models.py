@@ -57,3 +57,26 @@ def link_known_models(conn, *, now=None):
         made += len(found)
         conn_exec(conn, "UPDATE documents SET models_checked_at = %s WHERE id = %s", (now, doc_id))
     return made
+
+
+# Sister brands sell the same unit under the same model number (Rheem/Ruud, Carrier/Bryant/Payne, Trane/American
+# Standard). 8+ characters, as on prod every pair that long was a real family; shorter ones can be two unrelated
+# brands sharing a number by chance (2026-11-21).
+SISTER_MIN_KEY_LENGTH = 8
+
+
+def link_sister_brand_models(conn):
+    """A manual's model that a sister brand also sells (the same model key under another manufacturer) is linked under
+    that brand too, and the brand becomes one of the manual's (document_brands), so Breeze's model and brand lookups
+    for a Payne unit find the Bryant manual that prints its number, and gap-fill stops counting it uncovered. One
+    statement, safe to run every night. Returns how many model links were made."""
+    made = _rows(conn, "INSERT INTO document_models (document_id, model_id, model_key, manufacturer_id) "
+                       "SELECT DISTINCT dm.document_id, m.id, m.model_key, m.manufacturer_id FROM document_models dm "
+                       "JOIN models m ON m.model_key = dm.model_key AND m.manufacturer_id <> dm.manufacturer_id "
+                       "AND m.hidden_at IS NULL WHERE length(dm.model_key) >= %s AND dm.model_key ~ '[A-Z]' "
+                       "AND dm.model_key ~ '[0-9]' ON CONFLICT (document_id, model_id) DO NOTHING RETURNING 1",
+                 (SISTER_MIN_KEY_LENGTH,))
+    conn_exec(conn, "INSERT INTO document_brands (document_id, manufacturer_id) SELECT DISTINCT dm.document_id, "
+                    "dm.manufacturer_id FROM document_models dm JOIN documents d ON d.id = dm.document_id "
+                    "WHERE dm.manufacturer_id IS DISTINCT FROM d.manufacturer_id ON CONFLICT DO NOTHING")
+    return len(made)
