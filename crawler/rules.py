@@ -20,7 +20,12 @@ _BAD_TEXT = re.compile(
     r"\b(read more|press releases?|news|blog|careers?|jobs|privacy|terms|cookies?|log ?in|sign ?in|cart|"
     r"subscribe|share)\b", re.I)
 _NOT_DOCUMENTS = {"jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tif", "tiff", "ico", "heic", "mp4", "mov", "m4v",
-                  "avi", "webm", "wmv", "mp3", "wav", "m4a", "exe", "msi", "dmg", "pkg", "apk"}  # pictures, media, installers
+                  "avi", "webm", "wmv", "mp3", "wav", "m4a", "exe", "msi", "dmg", "pkg", "apk",  # pictures, media, installers
+                  # drawings, 3D/BIM models and archives the crawler can never read (prod 2026-11-21: 1,356 .zip, 487
+                  # .dwg, 341 .rtf, 198 .rfa and more were downloaded, then refused as bad_content_type). Not .xlsx or
+                  # .docx: filereaders.py can read those.
+                  "zip", "gz", "tgz", "rar", "7z", "dwg", "dxf", "dwf", "rfa", "rvt", "sat", "ifc", "step", "stp", "igs",
+                  "iges", "skp", "edz", "rtf"}
 _GOOD_FOLDERS = {"product", "products", "literature", "documents", "document", "downloads", "download", "manuals",
                  "specs", "specifications", "resources", "support", "technical", "docs"}
 
@@ -80,6 +85,11 @@ def parent_folder(url):
     """The folder a page sits in, all its segments: /en/about/team -> en/about. None for a page at the root."""
     segments = path_segments(url)
     return "/".join(segments[:-1]) if len(segments) >= 2 else None
+
+
+def is_not_document(url):
+    """The file ending of a picture, video, installer, drawing, model or archive: never worth a request."""
+    return _extension(url) in _NOT_DOCUMENTS
 
 
 def is_pdf_link(url):

@@ -114,6 +114,23 @@ def test_a_link_to_one_of_the_brands_start_pages_is_never_sent_to_the_link_check
     assert state(world, "/zone/other/")[:2] == ("fetched", "rule")
 
 
+def test_a_drawing_the_link_check_once_said_yes_to_is_not_fetched_again(world):
+    # an answer stored before the drawing rule must not keep a .dwg retried for weeks
+    start(world)
+    serve(world, "/start", ("/zone/unit.dwg", "Unit drawing"))
+    world.site.route("/zone/unit.dwg", b"AC1027", headers={"Content-Type": "application/octet-stream"})
+    host_id = world.fetcher()._host_row("ruud.test")["id"]
+    import hashlib
+    url = world.url("ruud.test", "/zone/unit.dwg")
+    with world.conn.cursor() as cur:
+        cur.execute("INSERT INTO pages (brand_id, host_id, url, url_sha, depth, fetch_state, decision, decided_by, "
+                    "decision_reason) VALUES (%s, %s, %s, %s, 1, 'queued', 'crawl', 'ai', 'fake yes')",
+                    (world.brand_id, host_id, url, hashlib.sha256(url.encode()).hexdigest()))
+    crawl(world)
+    assert "/zone/unit.dwg" not in paths(world)
+    assert state(world, "/zone/unit.dwg")[:2] == ("skipped_rule", "rule")
+
+
 def test_links_past_the_page_limit_are_recorded_and_the_run_says_so(world):
     sid = start(world)
     links = [f"/p{n}" for n in range(8)]

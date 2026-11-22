@@ -64,6 +64,27 @@ def test_an_image_video_or_installer_link_is_skipped_before_it_is_fetched(url):
     assert "not a document" in d.reason
 
 
+# Prod 2026-11-21: of 3,882 downloads refused as bad_content_type, 1,356 were .zip, 487 .dwg, 341 .rtf, 198 .rfa,
+# 69 .dxf, 41 .sat, 29 .ifc, 13 .step, 9 .gz, 7 .edz: drawings, models and archives the crawler can never read.
+@pytest.mark.parametrize("url", [
+    "https://content.greenheck.com/public/DAMProd/Original/10003/GB-3D.dwg",
+    "https://content.greenheck.com/public/DAMProd/Original/10006/GB_LOD200_AllSizes.zip",
+    "https://content.greenheck.com/public/DAMProd/Original/10002/GB_spec.rtf",
+    U + "/bim/RA15AZ.rfa", U + "/cad/RA15AZ.dxf", U + "/cad/RA15AZ.sat", U + "/bim/RA15AZ.ifc",
+    U + "/cad/RA15AZ.step", U + "/cad/RA15AZ.stp", U + "/files/all.tar.gz", U + "/eplan/panel.edz",
+])
+def test_a_drawing_model_or_archive_link_is_skipped_before_it_is_fetched(url):
+    d = decide(url, "Specifications", keywords=[kw("products", "prefer")])
+    assert (d.verdict, d.state, d.by) == ("skip", "skipped_rule", "rule")
+
+
+@pytest.mark.parametrize("url", [U + "/specs/RA15AZ.xlsx", U + "/manuals/RA15AZ.docx"])
+def test_a_spreadsheet_or_word_file_is_not_skipped_as_not_a_document(url):
+    # the crawler can read these (filereaders.py); 479 .xlsx and 339 .docx are a separate question
+    d = decide(url, "Specifications", keywords=[kw("products", "prefer")])
+    assert not (d.verdict == "skip" and "not a document" in (d.reason or ""))
+
+
 def test_a_skip_keyword_skips_with_the_keyword_as_the_reason():
     d = decide(U + "/blog/post", "Specifications", keywords=[kw("blog")])
     assert (d.verdict, d.state, d.by) == ("skip", "skipped_keyword", "rule")

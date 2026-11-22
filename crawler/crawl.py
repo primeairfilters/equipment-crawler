@@ -21,8 +21,8 @@ from crawler.brands import UnknownTarget, find_brand
 from crawler.documents import record_pdf
 from crawler.feeds import feed_links, feed_prefix
 from crawler.hosts import in_scope, normalize_host
-from crawler.rules import (LEARN_AFTER, Decision, Keyword, decide, is_pdf_link, is_valid_keyword, load_keywords,
-                           parent_folder)
+from crawler.rules import (LEARN_AFTER, Decision, Keyword, decide, is_not_document, is_pdf_link, is_valid_keyword,
+                           load_keywords, parent_folder)
 from crawler.textextract import index_page
 
 PDF_FIRST, PREFERRED, OTHER = 0, 1, 2
@@ -371,6 +371,8 @@ class _StartCrawl:
                 decision = Decision("crawl", "listed in a document feed", "rule")
             elif any(_sha(form) in self.starts for form in _spellings(url)):
                 decision = Decision("crawl", "a start address", "rule")
+            elif is_not_document(url):  # before a stored AI yes, which would keep it retried for weeks
+                decision = decide(url, text, keywords=self.keywords)
             elif decided_by == "ai" and stored_decision:
                 decision = Decision(stored_decision, None, "ai", "skipped_ai")
             else:

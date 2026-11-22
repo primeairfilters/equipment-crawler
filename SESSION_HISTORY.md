@@ -133,6 +133,12 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   tests in `test_p2_review_fixes.py`). Fujitsu General (→ `www.airstagehvac.com`) and Nortek (→
   `literature.nordyne.com`) had their whole sites refused before.
 
+- **Drawings, 3D models and archives are skipped by file ending** before any request or link check (`.zip`, `.gz`,
+  `.dwg`, `.dxf`, `.rfa`, `.rvt`, `.sat`, `.ifc`, `.step`/`.stp`, `.igs`, `.skp`, `.edz`, `.rtf` and more), including
+  links the link check had already said yes to (`rules._NOT_DOCUMENTS`, `crawl.py`). Of 3,882 `bad_content_type`
+  failures, 1,356 were .zip, 487 .dwg, 341 .rtf, 198 .rfa. Spreadsheets and Word files are deliberately not on the
+  list.
+
 ### Still open from 2026-11-21
 
 - **Fujitsu's whole site moved to `www.airstagehvac.com`**, not just its robots.txt: product pages answer 308 there
@@ -148,5 +154,6 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
 - Smaller leads from the code review, not yet checked on prod: a big backlog sent as one batch could pass the Batch
   API size limit; token counting runs before the cap check; a sheet over 95k tokens is skipped silently; any edit to
   `textextract.py` rebuilds every document's sections; scanned PDFs whose OCR failed are never retried.
-- CAD and zip files (`.dwg`, `.zip`, `.rtf`) are downloaded and then thrown away: 3,882 `bad_content_type` fetches.
-  Idea: skip them by file ending (noted in HVACApp `mental_notes.md`).
+- **Spreadsheets and Word files on brand sites are thrown away:** 479 `.xlsx`, 339 `.docx`, 181 `.doc` and 120 `.xls`
+  downloads failed as `bad_content_type`, though `filereaders.py` can read xlsx and docx (it does for uploads). Likely
+  real spec sheets and manuals: a "more crawl" opportunity, not built.
