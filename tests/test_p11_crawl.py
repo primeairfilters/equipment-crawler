@@ -100,6 +100,20 @@ def test_a_pdf_left_beyond_the_depth_by_an_earlier_run_is_fetched_on_the_next(wo
     assert state(world, "/manual.pdf")[0] == "fetched"
 
 
+def test_a_link_to_one_of_the_brands_start_pages_is_never_sent_to_the_link_check(world):
+    # Prod 2026-11-21: 653 start pages had been judged by the paid link check; a start page is crawled whatever it says
+    start(world)
+    start(world, "/zone/other/")
+    serve(world, "/start", ("/zone/other/", "Other"), ("/maybe", "Other"))
+    serve(world, "/zone/other/")
+    serve(world, "/maybe")
+    checker = Checker()
+    crawl(world, checker=checker)
+    assert world.url("ruud.test", "/maybe") in checker.asked()  # an ordinary unsure link with the same text is asked
+    assert world.url("ruud.test", "/zone/other/") not in checker.asked()
+    assert state(world, "/zone/other/")[:2] == ("fetched", "rule")
+
+
 def test_links_past_the_page_limit_are_recorded_and_the_run_says_so(world):
     sid = start(world)
     links = [f"/p{n}" for n in range(8)]

@@ -142,6 +142,10 @@ class _StartCrawl:
         self.max_pages, self.after_page, self.summary = max_pages, after_page, summary
         self.prefix = feed_prefix(self.start_url) if kind == "feed" else None
         self.approved = fetcher._approved(brand_id)
+        # the brand's start addresses: a link to one is crawled by rule, never sent to the paid link check (2026-11-21:
+        # 653 start pages on prod had been judged by it, and a start is crawled whatever it says)
+        self.starts = {r[0] for r in _rows(conn, "SELECT url_sha FROM start_urls WHERE brand_id = %s AND status = 'active'",
+                                           (brand_id,))}
         self._limits()
         self.heap, self.order = [], 0
         self.search_hosts = set()  # hosts whose search form is already kept
@@ -365,6 +369,8 @@ class _StartCrawl:
                 decision = Decision(stored_decision, "your verdict", "user", "skipped_user")
             elif from_kind == "json":
                 decision = Decision("crawl", "listed in a document feed", "rule")
+            elif any(_sha(form) in self.starts for form in _spellings(url)):
+                decision = Decision("crawl", "a start address", "rule")
             elif decided_by == "ai" and stored_decision:
                 decision = Decision(stored_decision, None, "ai", "skipped_ai")
             else:
