@@ -140,6 +140,9 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
         summary["models_linked"] = step("linking known models to manuals", lambda: link_known_models(conn)) or 0
         # a model a sister brand also sells is linked under that brand too (Rheem/Ruud, Carrier/Bryant/Payne)
         summary["sister_models_linked"] = step("linking sister-brand models", lambda: link_sister_brand_models(conn)) or 0
+        from crawler.documents import reread_unread  # a few kept PDFs with no text read again (free, no AI)
+        summary["reread"] = (step("reading again PDFs with no text",
+                                  lambda: reread_unread(conn, after_document=commit)) or {}).get("read", 0)
         step("parse issue list", lambda: _report_if_stale(conn, commit))
         vectors("embedding what last night built")
         return retried

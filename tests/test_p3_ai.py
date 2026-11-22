@@ -261,6 +261,49 @@ def test_a_document_that_fits_at_the_batch_price_is_no_longer_held(runtime_conn)
     assert len(fake.requests) == 1
 
 
+# 2026-11-21: every admitted document went into one batch. With the realistic set-aside, the $50 cap admits all
+# 17,238 waiting documents at once (about 650 MB of text), past the Batch API's 256 MB, and the send fails every pass.
+# A pass now stops at MAX_BATCH_REQUESTS requests or MAX_BATCH_BYTES of text; the rest wait for the next pass.
+
+def test_a_pass_sends_at_most_max_batch_requests_and_the_rest_wait(runtime_conn, monkeypatch):
+    import crawler.extract
+    from crawler.extract import extract_pass
+    monkeypatch.setattr(crawler.extract, "MAX_BATCH_REQUESTS", 2)
+    name, pages, fake = three_docs(runtime_conn)
+    extract_pass(runtime_conn, fake, brand=name, cap_usd=Decimal("100"))
+    assert [c[1] for c in fake.calls if c[0] == "submit_batch"] == [2]
+    settle(runtime_conn, fake, name, cap_usd=Decimal("100"))
+    assert statuses(runtime_conn, pages) == ["extracted"] * 3  # the third went in a later pass
+
+
+def test_a_pass_stops_before_its_batch_passes_max_batch_bytes(runtime_conn, monkeypatch):
+    import crawler.extract
+    from crawler.extract import extract_pass
+    monkeypatch.setattr(crawler.extract, "MAX_BATCH_BYTES", 1)  # room for the first document only
+    name, pages, fake = three_docs(runtime_conn)
+    extract_pass(runtime_conn, fake, brand=name, cap_usd=Decimal("100"))
+    assert [c[1] for c in fake.calls if c[0] == "submit_batch"] == [1]
+
+
+def test_a_failed_send_saves_its_reset_so_no_document_is_left_submitting(runtime_conn):
+    # the nightly step rolls back after a failure; a reset that was never saved left the 'submitting' mark (saved
+    # just before the send) in place for good: never tagged, its set-aside counted against the cap forever
+    from crawler.extract import extract_pass
+    name, pages, fake = three_docs(runtime_conn)
+
+    def broken(requests):
+        raise RuntimeError("batch too large")
+    fake.submit_batch = broken
+    seen = []
+
+    def save():
+        seen.append(q(runtime_conn, "SELECT COUNT(*) FROM pages WHERE id = ANY (%s) AND ai_batch_id = 'submitting'",
+                      (pages,))[0][0])
+    with pytest.raises(RuntimeError):
+        extract_pass(runtime_conn, fake, brand=name, cap_usd=Decimal("100"), after_document=save)
+    assert seen[0] == 3 and seen[-1] == 0  # marked and saved before the send, reset and saved after it failed
+
+
 def test_a_cap_too_small_for_even_one_request_sends_nothing_and_does_not_fail(runtime_conn):
     name, pages, fake = three_docs(runtime_conn)
     settle(runtime_conn, fake, name, cap_usd=Decimal("0.001"), max_tokens=4096)
@@ -309,6 +352,29 @@ def test_a_document_over_100k_prompt_tokens_is_split_into_requests_under_the_lim
     submitted = len(fake.requests)
     settle(runtime_conn, fake, name)
     assert len(fake.requests) == submitted  # a split document is not read again either
+
+
+def test_one_page_too_big_for_a_request_is_cut_into_pieces_instead_of_the_document_being_skipped(runtime_conn):
+    # 2026-11-21: a single page over the limit (a big spreadsheet's sheet is one page) made _plan give up and the
+    # whole document was marked skipped, with no note anywhere
+    name, brand_id = new_brand(runtime_conn)
+    rows = "\n".join(f"RA15AZ{n:04d}BX  2.0 ton  15.2 SEER2  some description words here" for n in range(9000))
+    page_id = make_doc(runtime_conn, brand_id, [rows])  # about 590k characters: about 147k tokens by len//4
+    fake = FakeAI(responder_for({"RA15AZ0000BX": answer("RA15AZ0000BX")}))
+    settle(runtime_conn, fake, name)
+    assert len(fake.requests) >= 2
+    for r in fake.requests:
+        assert (len(r.system) + len(r.text)) // 4 <= 100_000
+    assert "RA15AZ8999BX" in "".join(r.text for r in fake.requests)  # the end of the page went out too
+    assert q(runtime_conn, "SELECT extraction_status FROM pages WHERE id = %s", (page_id,)) != (("skipped",),)
+
+
+def test_with_no_money_left_no_tokens_are_counted(runtime_conn):
+    # counting is a network call per document (or per page of a big one) and was made before the money check
+    name, pages, fake = three_docs(runtime_conn)
+    settle(runtime_conn, fake, name, cap_usd=Decimal("0.000001"))
+    assert [c for c in fake.calls if c[0] == "count_tokens"] == []
+    assert statuses(runtime_conn, pages) == ["waiting"] * 3
 
 
 # ---------------------------------------------------------------- crawl -> text -> AI, end to end

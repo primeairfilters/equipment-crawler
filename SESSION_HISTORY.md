@@ -173,22 +173,57 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   and the ICP brands, Trane/American Standard, York/Johnson Controls/Coleman/Luxaire, Nortek's brands, Bradford
   White/Laars), 2,487 links over 307 manuals and 1,052 models. Data only: no Breeze change needed.
 
+### Overnight batch (2026-11-21, the user asleep; each cause checked on prod first, each test watched fail)
+
+- **Tagging batches are capped per pass** at 5,000 requests or about 150 MB of text (`extract.MAX_BATCH_REQUESTS`,
+  `MAX_BATCH_BYTES`); the Batch API takes up to 100,000 requests or 256 MB. Urgent because of the set-aside fix: with
+  realistic set-asides, $50 would admit all 17,238 waiting documents (about 650 MB) in one batch on Dec 1, and the
+  send would fail every pass.
+- **A failed send now saves its reset** (`extract.py`): the nightly step rolls back after a failure, which kept the
+  "submitting" mark saved just before the send. Those documents were never tagged and their set-aside counted against
+  the cap forever. Confirmed by a test that saw all 3 documents still "submitting" at the last save; prod had 0 at
+  the time.
+- **No tokens counted when the money can't cover a document:** a low price guess (5 characters a token) is checked
+  first; counting is a network call per document and ran for every waiting document even with nothing left.
+- **One page too big for a request is cut at line ends** into pieces (`extract._cut`) instead of the whole document
+  being skipped (a big spreadsheet's sheet is one page).
+- **Sitemap limit counts matches:** the 5,000 limit now counts addresses under a start section, not the sitemap's
+  first 5,000 (`sitemaps.take`); an index still reads at most 5,000 sitemaps.
+- **PDFs with no text are read again nightly:** up to 20 a night, least recently tried first
+  (`documents.reread_unread`); `reread` had only run by hand.
+- **Short sister-brand numbers (6-7 characters)** are linked only between brands proven a family by 5+ links of 8+
+  characters (`known_models.FAMILY_PROOF`). On prod the short matches inside proven families were Ruud/Rheem,
+  Carrier/Bryant, Trane/American Standard, Daikin/Goodman; outside were chance pairs like Bosch/Bryant.
+- **The 52 never-loaded start pages on approved sites needed no code:** they sat on sites approved only tonight
+  (Dunham-Bush, Krack, Hussmann, CaptiveAire) or on Fujitsu (robots redirect, fixed).
+- **Nortek's literature site moved** to `literature.nordyne.com` (every page and robots.txt answer 301 there; checked
+  with the honest name). Brands using the old address: Nortek and Mammoth. Needs the user's approval (below).
+- **Found the run switched off:** "Run all the time" is off (`control.settings.run_nonstop = f`, changed 04:58 UTC
+  when the crawler was stopped to deploy) and the window is 1:00-1:05 AM Pacific. Nothing has run since the deploy
+  (last run ended 05:07 UTC). Migration 0040 is on prod, so the deploy went through.
+
 ### Still open from 2026-11-21
 
-- **After the next runs:** check the Fujitsu/AirStage page went from `waiting` to crawled
-  (`control.start_page_status`), the link check's `rejected` share is near 0, Trane articles arrive through the
-  help-center API, and the 48,201 unembedded sections got vectors.
-- **Nortek's `literature.nortekhvac.com`** redirects to `literature.nordyne.com`; check whether its pages moved like
-  Fujitsu's (if so, approve `literature.nordyne.com`).
+- **Turn "Run all the time" back on** (cog on the /admin crawler page), or nothing new runs.
+- **Approve Nortek's new literature site:** `./crawl ok literature.nordyne.com --brand "Nortek"` and the same with
+  `--brand "Mammoth"`.
+- **Old Word and Excel files** need new packages in the image: `xlrd` (pip) for .xls, `catdoc` or `antiword` (apt) for
+  .doc. Not added overnight; 181 .doc and 120 .xls on prod.
+- **Help-center articles one at a time:** Trane's 2,470 articles take about 7 hours of Trane's host time at the
+  10-second gap, again on every 30-day recheck, and a brand's turn is 3 hours, so they crowd out Trane's other pages
+  for about three nights a month. The list endpoint gives 100 per request (about 25 requests). Not built: it needs the
+  list's articles saved as pages outside the normal fetch, too much to do unattended.
+- **Any edit to `textextract.py` rebuilds every document's sections** (its file hash is in `build_version`). Left
+  alone: it is how reader fixes reach every document, and changing how the version is worked out would itself cause
+  one full rebuild. A trade-off for the user.
+- **After the next runs** (needs "Run all the time" back on): check the Fujitsu/AirStage page went from `waiting` to
+  crawled (`control.start_page_status`), Trane articles arrive through the help-center API (1 fetched, 2,494 failed
+  on 2026-11-22 06:54 UTC), and the 48,201 unembedded sections got vectors. The link check and tagging only run again
+  when the $50 cap resets on Dec 1; then check the link check's `rejected` share is near 0 and the first tagging
+  batch stays under the new per-pass limits.
+- Model numbers shorter than 6 characters shared by two brands are never linked across brands.
 - Eaton and Baldor time out even from a desktop with the crawler's honest name: bot blocking, nothing honest to fix.
 - `www.www.nortekair.com` and `www.www.lennoxpros.com` are typo hosts from discovery.
-- Model numbers shorter than 8 characters shared by two brands (1,225 links on prod) are not linked across brands:
-  some may be sister brands, some chance. Not checked.
-- Smaller leads from the code review, not yet checked on prod: a big backlog sent as one batch could pass the Batch
-  API size limit; token counting runs before the cap check; a sheet over 95k tokens is skipped silently; any edit to
-  `textextract.py` rebuilds every document's sections; scanned PDFs whose OCR failed are never retried.
-- **Old Word and Excel files (`.doc` 181, `.xls` 120)** still fail as `bad_content_type`: no reader for the old
-  binary formats. A "more crawl" opportunity, not built.
 - **`tests/test_p14_search.py::test_a_search_inside_some_manuals_measures_every_distance_instead_of_walking_the_vector_index`
   is flaky:** it failed twice on 2026-11-21 (the plan had no `section_vectors_te3s_1536_hnsw`) and passed in a later
   run with no change to search. It reads the testing database's query plan, which depends on what that database holds

@@ -56,6 +56,20 @@ def record_pdf(conn, brand_id, page_id, url, body, file_type="pdf"):
     return document_id
 
 
+REREAD_PER_NIGHT = 20
+
+
+def reread_unread(conn, after_document=None, limit=REREAD_PER_NIGHT):
+    """The nightly run's share of reread: a few kept PDFs that have no text at all (the reader or OCR failed on them),
+    the least recently tried first, so one that keeps failing goes to the back (reread stamps updated_at). Before
+    2026-11-21 reread ran only by hand and such PDFs stayed without text (prod: 19 skipped scans)."""
+    ids = [r[0] for r in _rows(conn, "SELECT id FROM documents WHERE file_type = 'pdf' AND hidden_at IS NULL "
+                                     "AND COALESCE(text_pages, 0) = 0 ORDER BY updated_at, id LIMIT %s", (limit,))]
+    if not ids:
+        return {"read": 0, "unreadable": 0, "documents": []}
+    return reread(conn, after_document=after_document, documents=ids)
+
+
 def reread(conn, brand_id=None, after_document=None, documents=None):
     """Read again every kept PDF whose document has no pages (the reader failed on it, e.g. a big manual before the
     reader closed pages as it went) or needs OCR (a better reader may recover pages; a true scan comes out the same).

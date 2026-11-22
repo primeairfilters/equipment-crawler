@@ -99,6 +99,20 @@ def test_a_short_shared_number_is_not_taken_as_the_same_unit(runtime_conn):
              (doc, sister)) == ()
 
 
+def test_a_short_shared_number_is_linked_between_brands_already_proven_a_family(runtime_conn):
+    # prod 2026-11-21: 6-7 character matches inside families proven by 5+ long matches were Ruud/Rheem, Carrier/Bryant,
+    # Trane/American Standard, Daikin/Goodman; outside them were chance pairs like Bosch/Bryant
+    from crawler.known_models import link_sister_brand_models
+    from crawler.store import manufacturer_for
+    longs = tuple(f"RA15AZ{n:02d}AJ3CA" for n in range(5))
+    name, doc = manual(runtime_conn, ["Units: " + " ".join(longs) + " and RA15A9"], models=longs + ("RA15A9",))
+    sister, _ = new_brand(runtime_conn)
+    known(runtime_conn, sister, *longs, "RA15A9")
+    link_sister_brand_models(runtime_conn)
+    assert q(runtime_conn, "SELECT 1 FROM document_models WHERE document_id = %s AND manufacturer_id = %s "
+                           "AND model_key = 'RA15A9'", (doc, manufacturer_for(runtime_conn, sister))) == ((1,),)
+
+
 def test_linking_sister_brands_twice_adds_nothing_the_second_time(runtime_conn):
     from crawler.known_models import link_sister_brand_models
     doc, sister = sister_link(runtime_conn, ("PA14NA036000",), ("PA14NA036000",))

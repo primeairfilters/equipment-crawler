@@ -48,6 +48,25 @@ def test_a_pdf_the_reader_failed_on_is_read_again_from_the_kept_original(world, 
     assert len(world.site.hits()) == hits  # nothing fetched
 
 
+# 2026-11-21: reread only ran by hand (./crawl reread), so a PDF the reader or OCR failed on stayed without text until
+# someone ran it (prod: 19 skipped scans). The nightly run now reads again a few kept PDFs that have no text at all.
+
+def test_the_nightly_reread_reads_again_a_kept_pdf_that_has_no_text(world, monkeypatch):
+    from crawler.documents import reread_unread
+    sha = unreadable_crawl(world, monkeypatch, "/manual.pdf")
+    assert document(world, sha) == ((0, 0, False),)
+    assert reread_unread(world.conn)["read"] >= 1
+    assert document(world, sha) == ((2, 2, False),)
+
+
+def test_the_nightly_reread_leaves_documents_with_text_alone(world, monkeypatch):
+    from crawler.documents import reread_unread
+    sha = unreadable_crawl(world, monkeypatch, "/manual.pdf")
+    reread_unread(world.conn)
+    doc_id = world.one("SELECT id FROM documents WHERE content_sha = %s", (sha,))[0][0]
+    assert doc_id not in reread_unread(world.conn)["documents"]  # it has its text now
+
+
 def test_the_same_pdf_at_two_addresses_gets_its_text_at_both(world, monkeypatch):
     from crawler.documents import reread
     sha = unreadable_crawl(world, monkeypatch, "/a.pdf", "/b.pdf")

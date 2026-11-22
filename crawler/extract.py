@@ -30,6 +30,10 @@ DEFAULT_MAX_TOKENS = 16000  # 2026-11-08: was 4000; Evapco spec sheets and a coi
 # full price (prod to 2026-11-21: answers 109 tokens median, 720 at the 99th percentile, 6,156 at most). A rare answer
 # longer than this goes over by at most (max_tokens - this) at $0.25 per million, a fraction of a cent.
 RESERVE_OUTPUT_TOKENS = 2000
+# One pass's batch stays well inside the Batch API's 100,000 requests and 256 MB; the rest wait for the next pass
+# (2026-11-21: with the realistic set-aside, $50 admitted all 17,238 waiting documents, about 650 MB, in one batch).
+MAX_BATCH_REQUESTS = 5000
+MAX_BATCH_BYTES = 150 * 1024 * 1024  # the texts and system prompts sent, before JSON and HTTP add their share
 DEFAULT_CAP_USD = "50"
 RETRY_AFTER = timedelta(days=1)
 
@@ -287,6 +291,28 @@ def _collect(conn, client, brand_id, now, after_document):
 
 # ---------------------------------------------------------------- submitting new work
 
+def _cut(text, tokens):
+    """One page's text in pieces of about 80% of the split target each, cut at line ends (2026-11-21: a page over the
+    limit made the whole document be skipped). A line longer than a piece is cut where it reaches the size."""
+    count = -(-tokens // int(SPLIT_TARGET_TOKENS * 0.8))
+    size = len(text) // count + 1
+    pieces, current = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > size:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(line[:size])
+            line = line[size:]
+        if len(current) + len(line) > size and current:
+            pieces.append(current)
+            current = ""
+        current += line
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def _plan(client, model, page_texts, chosen, max_tokens):
     """Request texts and token counts for one document: one request, or several if it is over the limit."""
     marked = [_marked(i + 1, page_texts[i]) for i in chosen]
@@ -295,10 +321,18 @@ def _plan(client, model, page_texts, chosen, max_tokens):
     if tokens <= SPLIT_TARGET_TOKENS:
         return [(whole, tokens)]
     counts = [client.count_tokens(model, SYSTEM, m) for m in marked]
-    if any(c > SPLIT_TARGET_TOKENS for c in counts):
-        return None
-    groups, current, total = [], [], 0
+    pieces = []  # a page over the limit (a big sheet is one page) is cut at line ends, not the document skipped
     for text, c in zip(marked, counts):
+        if c <= SPLIT_TARGET_TOKENS:
+            pieces.append((text, c))
+            continue
+        for part in _cut(text, c):
+            part_tokens = client.count_tokens(model, SYSTEM, part)
+            if part_tokens > SPLIT_TARGET_TOKENS:
+                return None
+            pieces.append((part, part_tokens))
+    groups, current, total = [], [], 0
+    for text, c in pieces:
         if current and total + c > SPLIT_TARGET_TOKENS:
             groups.append(("\n\n".join(current), total))
             current, total = [], 0
@@ -394,8 +428,12 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
     in_flight = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages WHERE ai_batch_id IS NOT NULL")[0][0])
     room = cap - spent - in_flight
     requests, admitted, taken = [], [], set()
+    batch_bytes = 0
 
     for page_id, page_brand, page_count in eligible:
+        if len(requests) >= MAX_BATCH_REQUESTS or batch_bytes >= MAX_BATCH_BYTES:
+            summary["held"] += 1  # the batch is full: no text read, no tokens counted; the next pass takes it
+            continue
         texts, _ = _texts(conn, page_id, page_count)
         chosen = pick_pages(texts)
         if not chosen:
@@ -416,6 +454,13 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
                 (sha, EXTRACTOR_VERSION)):
             summary["held"] += 1  # the same text is already on its way; the next pass finds it read
             continue
+        # a low guess at the price (5 characters a token) before any token is counted: counting is a network call
+        # per document, and was made for every waiting document even with no money left (2026-11-21)
+        rough = sum(len(texts[i]) for i in chosen) // 5
+        if ai.cost(model, input_tokens=rough, output_tokens=min(max_tokens, RESERVE_OUTPUT_TOKENS), batch=True,
+                   check_long=True) > room:
+            summary["held"] += 1
+            continue
         plan = _plan(client, model, texts, chosen, max_tokens)
         if plan is None:
             _exec(conn, "UPDATE pages SET extraction_status = 'skipped', ai_extractor_version = %s WHERE id = %s",
@@ -431,6 +476,7 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
         taken.add(sha)
         for part, (text, _) in enumerate(plan):
             requests.append(ai.Request(f"p{page_id}-{part}", model, SYSTEM, text, max_tokens))
+            batch_bytes += len(text.encode("utf-8")) + len(SYSTEM.encode("utf-8"))
         admitted.append((page_id, sha, len(plan), reserve))
 
     if requests:
@@ -445,6 +491,8 @@ def _extract(conn, client, brand_id, model, cap, now, max_tokens, after_document
         except Exception:
             for page_id, sha, parts, reserve in admitted:
                 _exec(conn, "UPDATE pages SET ai_batch_id = NULL, ai_reserved_usd = 0 WHERE id = %s", (page_id,))
+            if after_document:
+                after_document()  # saved: the caller rolls back after a failure, which left the 'submitting' mark
             raise
         for page_id, sha, parts, reserve in admitted:
             _exec(conn, "UPDATE pages SET ai_batch_id = %s, ai_pending_sha = %s, ai_parts = %s, ai_model = %s, "

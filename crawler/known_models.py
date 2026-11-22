@@ -63,6 +63,11 @@ def link_known_models(conn, *, now=None):
 # Standard). 8+ characters, as on prod every pair that long was a real family; shorter ones can be two unrelated
 # brands sharing a number by chance (2026-11-21).
 SISTER_MIN_KEY_LENGTH = 8
+# A 6-7 character match counts only between two brands already proven a family by FAMILY_PROOF long matches: on prod
+# those were Ruud/Rheem, Carrier/Bryant, Trane/American Standard, Daikin/Goodman, and the ones outside were chance
+# pairs like Bosch/Bryant (2026-11-21).
+SISTER_SHORT_KEY_LENGTH = 6
+FAMILY_PROOF = 5
 
 
 def link_sister_brand_models(conn):
@@ -76,6 +81,16 @@ def link_sister_brand_models(conn):
                        "AND m.hidden_at IS NULL WHERE length(dm.model_key) >= %s AND dm.model_key ~ '[A-Z]' "
                        "AND dm.model_key ~ '[0-9]' ON CONFLICT (document_id, model_id) DO NOTHING RETURNING 1",
                  (SISTER_MIN_KEY_LENGTH,))
+    made += _rows(conn, "WITH family AS (SELECT d.manufacturer_id AS a, dm.manufacturer_id AS b FROM document_models dm "
+                        "JOIN documents d ON d.id = dm.document_id WHERE dm.manufacturer_id <> d.manufacturer_id "
+                        "AND length(dm.model_key) >= %s GROUP BY 1, 2 HAVING COUNT(*) >= %s) "
+                        "INSERT INTO document_models (document_id, model_id, model_key, manufacturer_id) "
+                        "SELECT DISTINCT dm.document_id, m.id, m.model_key, m.manufacturer_id FROM document_models dm "
+                        "JOIN models m ON m.model_key = dm.model_key AND m.manufacturer_id <> dm.manufacturer_id "
+                        "AND m.hidden_at IS NULL JOIN family f ON f.a = dm.manufacturer_id AND f.b = m.manufacturer_id "
+                        "WHERE length(dm.model_key) >= %s AND length(dm.model_key) < %s AND dm.model_key ~ '[A-Z]' "
+                        "AND dm.model_key ~ '[0-9]' ON CONFLICT (document_id, model_id) DO NOTHING RETURNING 1",
+                  (SISTER_MIN_KEY_LENGTH, FAMILY_PROOF, SISTER_SHORT_KEY_LENGTH, SISTER_MIN_KEY_LENGTH))
     conn_exec(conn, "INSERT INTO document_brands (document_id, manufacturer_id) SELECT DISTINCT dm.document_id, "
                     "dm.manufacturer_id FROM document_models dm JOIN documents d ON d.id = dm.document_id "
                     "WHERE dm.manufacturer_id IS DISTINCT FROM d.manufacturer_id ON CONFLICT DO NOTHING")

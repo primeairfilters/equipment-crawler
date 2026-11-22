@@ -164,6 +164,17 @@ def test_at_most_max_urls_are_taken_from_one_sitemap(w):
     assert sitemap_urls(w) == [under(w, f"m{n:02d}") for n in range(5)]
 
 
+def test_the_limit_counts_only_addresses_under_a_start_section(w):
+    # 2026-11-21: the limit was applied to the sitemap's first addresses before the section filter, so a big sitemap
+    # that listed the wanted section late gave nothing
+    set_robots(w, f"Sitemap: {w.url('ruud.test', '/sitemap.xml')}")
+    other = [w.url("ruud.test", f"/blog/post-{n}") for n in range(8)]
+    w.site.route("/sitemap.xml", urlset(*other, under(w, "late-1"), under(w, "late-2"), under(w, "late-3")),
+                 headers=XML)
+    assert read(w, max_urls=2) == 2
+    assert sitemap_urls(w) == [under(w, "late-1"), under(w, "late-2")]
+
+
 def test_other_schemes_and_unapproved_hosts_inside_a_sitemap_are_dropped(w):
     set_robots(w, f"Sitemap: {w.url('ruud.test', '/sitemap.xml')}")
     w.site.route("/sitemap.xml", urlset(

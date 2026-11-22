@@ -23,8 +23,9 @@ def _rows(conn, sql, args=()):
         return cur.fetchall()
 
 
-def _locs(body, max_urls):
-    """(kind, [loc, ...]) from sitemap XML: kind is 'urlset' or 'index'. Anything odd gives (None, [])."""
+def _locs(body, max_urls=None):
+    """(kind, [loc, ...]) from sitemap XML: kind is 'urlset' or 'index'. Anything odd gives (None, []). Every address
+    unless max_urls is given (the body itself is capped by the fetcher)."""
     try:
         root = ElementTree.fromstring(body, forbid_dtd=True)
     except Exception:  # not XML, a DTD, entities, or a bomb
@@ -36,7 +37,7 @@ def _locs(body, max_urls):
     for node in root.iter():
         if node.tag.rsplit("}", 1)[-1] == "loc" and node.text and node.text.strip():
             locs.append(node.text.strip())
-            if len(locs) >= max_urls:
+            if max_urls is not None and len(locs) >= max_urls:
                 break
     return kind, locs
 
@@ -73,12 +74,18 @@ def read_sitemaps(conn, fetcher, brand_name, *, max_urls=MAX_SITEMAP_URLS):
     added = 0
 
     def take(locs):
+        """At most max_urls of one sitemap's addresses that are under a start section: the limit counts the matches,
+        not the sitemap's first addresses (2026-11-21: a big sitemap listing the section late gave nothing)."""
         nonlocal added
+        matched = 0
         for loc in locs:
+            if matched >= max_urls:
+                break
             host, path = _host_and_path(loc)
             if (host is None or len(loc) > 2048 or not in_scope(loc, approved)
                     or not any(host == h and path.startswith(p) for h, p in sections)):
                 continue
+            matched += 1
             with conn.cursor() as cur:
                 # a listed page is its own start, so one link deep reaches its documents (D60)
                 cur.execute("INSERT INTO start_urls (brand_id, url, url_sha, found_by, depth) VALUES (%s, %s, %s, 'sitemap', 1) "
@@ -92,7 +99,8 @@ def read_sitemaps(conn, fetcher, brand_name, *, max_urls=MAX_SITEMAP_URLS):
         result = fetcher.fetch(url, brand_id, xml=True)
         if result.outcome not in ("fetched", "not_modified") or not result.body:
             return None, []
-        return _locs(result.body, max_urls)
+        kind, locs = _locs(result.body)
+        return kind, locs[:max_urls] if kind == "index" else locs  # an index: at most max_urls sitemaps to read
 
     seen = set()
     for url in dict.fromkeys(sitemap_urls):
