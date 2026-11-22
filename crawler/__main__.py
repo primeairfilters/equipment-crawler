@@ -108,7 +108,7 @@ def build_parser():
 
 
 def _discover(conn, brand):
-    """Ask AI where the brand's data lives (once every 180 days), then read approved hosts' sitemaps."""
+    """Ask AI where the brand's data lives (once every 90 days), then read approved hosts' sitemaps."""
     from crawler.ai import AnthropicClient
     from crawler.discover import discover
     from crawler.fetch import Fetcher

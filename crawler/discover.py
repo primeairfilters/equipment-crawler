@@ -1,4 +1,7 @@
-"""Brand discovery: one live web-search call per brand, every 180 days. Found hosts wait for `ok`."""
+"""Brand discovery: one live web-search call per brand, every 90 days. Found hosts wait for `ok`.
+
+A redo names the hosts already known and allows 2 web searches instead of 8, since it only looks for what is new (prod,
+November 2026: calls that used 2 searches cost 2.28 cents on average, all 160 calls 3.63 cents)."""
 import ipaddress
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,9 +14,10 @@ from crawler.brands import UnknownTarget, find_brand
 from crawler.hosts import is_refused_host, normalize_host
 
 MAX_USES = 8
+REDO_MAX_USES = 2
 MAX_TOKENS = 8000
 ASSUMED_INPUT_TOKENS = 150_000  # worst case for the cap: search results are read as input, over the 100k price step
-REDO_AFTER = timedelta(days=180)
+REDO_AFTER = timedelta(days=90)
 DEFAULT_CAP_USD = "50"
 MAX_URL_LENGTH = 2048
 
@@ -101,7 +105,7 @@ def _utcnow():
 
 
 def discover(conn, client, brand_name, *, now=None, cap_usd=None):
-    """Find hosts and start URLs for a brand. Does nothing if it was done in the last 180 days or the cap is short."""
+    """Find hosts and start URLs for a brand. Does nothing if it was done in the last 90 days or the cap is short."""
     now = now or _utcnow()
     brand_id = find_brand(conn, brand_name)
     if brand_id is None:
@@ -110,15 +114,18 @@ def discover(conn, client, brand_name, *, now=None, cap_usd=None):
     if done_at is not None and now - done_at < REDO_AFTER:
         return "recent"
 
+    known = [] if done_at is None else [r[0] for r in _rows(
+        conn, "SELECT host FROM brand_domains WHERE brand_id = %s ORDER BY host", (brand_id,))]
+    uses = REDO_MAX_USES if done_at is not None else MAX_USES
     model = ai.HAIKU if client.supports_web_search(ai.HAIKU) else ai.SONNET
     cap = Decimal(str(cap_usd if cap_usd is not None else os.environ.get("AI_MONTHLY_CAP_USD", DEFAULT_CAP_USD)))
-    worst = ai.cost(model, input_tokens=ASSUMED_INPUT_TOKENS, output_tokens=MAX_TOKENS, searches=MAX_USES, check_long=True)
+    worst = ai.cost(model, input_tokens=ASSUMED_INPUT_TOKENS, output_tokens=MAX_TOKENS, searches=uses, check_long=True)
     reserved = Decimal(_rows(conn, "SELECT COALESCE(SUM(ai_reserved_usd), 0) FROM pages WHERE ai_batch_id IS NOT NULL")[0][0])
     if ai.monthly_spend(conn, now) + reserved + worst > cap:
         return "budget"
 
     trades = _rows(conn, "SELECT trades FROM brands WHERE id = %s", (brand_id,))[0][0] or []
-    reply = client.discover(model, brand_name, MAX_USES, MAX_TOKENS, trades=trades)
+    reply = client.discover(model, brand_name, uses, MAX_TOKENS, trades=trades, known=known)
     answer = reply.output if isinstance(reply.output, dict) else None
     _exec(conn,
           "INSERT INTO ai_calls (purpose, brand_id, page_id, model, input_tokens, output_tokens, cache_read_tokens, "
@@ -130,7 +137,10 @@ def discover(conn, client, brand_name, *, now=None, cap_usd=None):
     if answer is None:
         return "unusable"
 
-    own = set()
+    # a redo is told not to repeat known domains, so a new start page may sit on one: the brand's own known sites
+    # count, not the PDF-only hosts the crawler approved itself (scope 'pdf') nor stopped ones
+    own = set() if done_at is None else {r[0] for r in _rows(
+        conn, "SELECT host FROM brand_domains WHERE brand_id = %s AND scope = 'all' AND status <> 'stopped'", (brand_id,))}
     for key in ("domains", "document_hosts"):
         for entry in _items(answer, key):
             host = _clean_host(entry.get("host"))

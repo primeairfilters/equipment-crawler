@@ -95,14 +95,16 @@ class FakeDiscoverAI:
         self.usage = (input_tokens, output_tokens, searches)
         self.truncated = truncated
         self.calls = []  # ("supports_web_search", model) and ("discover", model, brand, max_uses, max_tokens)
+        self.known = []  # the hosts each discover call named as already known (a redo), in order
 
     def supports_web_search(self, model):
         self.calls.append(("supports_web_search", model))
         return model in self.web_search_models
 
-    def discover(self, model, brand, max_uses, max_tokens, trades=()):
+    def discover(self, model, brand, max_uses, max_tokens, trades=(), known=()):
         from crawler.ai import DiscoverReply
         self.calls.append(("discover", model, brand, max_uses, max_tokens, list(trades)))
+        self.known.append(list(known))
         in_tok, out_tok, searches = self.usage
         out = self.output(brand) if callable(self.output) else self.output
         if isinstance(out, dict):

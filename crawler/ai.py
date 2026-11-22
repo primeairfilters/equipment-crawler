@@ -30,13 +30,18 @@ TRADE_WORDS = {"hvac": "HVAC", "plumbing": "plumbing", "electrical": "electrical
                "garage_doors": "garage doors"}
 
 
-def discover_question(brand, trades):
+def discover_question(brand, trades, known=()):
     """The user turn of the discovery call. With trades, only that equipment is wanted (Honda: generators, not cars);
-    the system prompt stays the same for every brand."""
-    if not trades:
-        return f"Brand: {brand}"
-    words = ", ".join(TRADE_WORDS.get(t, t.replace("_", " ")) for t in trades)  # a trade new to the list: its key in words
-    return (f"Brand: {brand}\nOnly its {words} equipment: leave out the sites and pages for its other products.")
+    a redo names the hosts already known and asks only for what is new. The system prompt stays the same for every
+    brand."""
+    text = f"Brand: {brand}"
+    if trades:
+        words = ", ".join(TRADE_WORDS.get(t, t.replace("_", " ")) for t in trades)  # a trade new to the list: its key
+        text += f"\nOnly its {words} equipment: leave out the sites and pages for its other products."
+    if known:
+        text += (f"\nAlready known: {', '.join(known)}. Report only new domains and document hosts that are not in this "
+                 "list, and new start_urls (they may be on a known domain).")
+    return text
 
 class UnknownModel(Exception):
     pass
@@ -128,12 +133,12 @@ class AnthropicClient:
         info = self._sdk.models.retrieve(model)
         return bool(info.capabilities and info.capabilities.server_tools.web_search.supported)
 
-    def discover(self, model, brand, max_uses, max_tokens, trades=()):
+    def discover(self, model, brand, max_uses, max_tokens, trades=(), known=()):
         """One live call with the web search tool (not a batch). The answer is a JSON object."""
         from crawler.discover import DISCOVER_SCHEMA, DISCOVER_SYSTEM
         reply = self._sdk.messages.create(
             model=model, max_tokens=max_tokens, system=DISCOVER_SYSTEM,
-            messages=[{"role": "user", "content": discover_question(brand, trades)}],
+            messages=[{"role": "user", "content": discover_question(brand, trades, known)}],
             tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses,
                     "allowed_callers": ["direct"]}],
             output_config={"format": {"type": "json_schema", "schema": DISCOVER_SCHEMA}})

@@ -219,7 +219,7 @@ def test_discovery_pauses_when_the_month_is_nearly_spent_and_resumes_on_the_firs
 
 # ---------------------------------------------------------------- every 180 days
 
-def test_discovery_runs_again_only_after_180_days(runtime_conn):
+def test_discovery_runs_again_only_after_90_days(runtime_conn):
     name, brand_id = new_brand(runtime_conn)
     fake = FakeDiscoverAI(GOOD)
     run_discover(runtime_conn, fake, name, now=T0)
@@ -227,12 +227,41 @@ def test_discovery_runs_again_only_after_180_days(runtime_conn):
     assert q(runtime_conn, "SELECT discovered_at FROM brands WHERE id = %s", (brand_id,)) == ((T0,),)
 
     calls = list(fake.calls)
-    run_discover(runtime_conn, fake, name, now=T0 + timedelta(days=179))
+    run_discover(runtime_conn, fake, name, now=T0 + timedelta(days=89))
     assert fake.calls == calls  # no web-search call and not even a capability check
     assert q(runtime_conn, "SELECT COUNT(*) FROM ai_calls WHERE brand_id = %s", (brand_id,))[0][0] == 1
 
-    run_discover(runtime_conn, fake, name, now=T0 + timedelta(days=181))
+    run_discover(runtime_conn, fake, name, now=T0 + timedelta(days=91))
     assert len(fake.discover_calls()) == 2
+
+
+# ---------------------------------------------------------------- the cheaper redo (2026-11-21)
+# Prod, November 2026: calls that used 2 web searches cost 2.28 cents on average, the 160 calls overall 3.63 cents
+# (search fees were $4.74 of $5.81). A redo only needs what is new, so it names the sites already known and stops at 2.
+
+def test_a_redo_makes_at_most_two_web_searches_and_names_the_sites_already_known(runtime_conn):
+    name, brand_id = new_brand(runtime_conn)
+    fake = FakeDiscoverAI(GOOD)
+    run_discover(runtime_conn, fake, name, now=T0)
+    run_discover(runtime_conn, fake, name, now=T0 + timedelta(days=91))
+    first, redo = fake.discover_calls()
+    assert first[3] == 8 and redo[3] == 2
+    assert fake.known == [[], ["files.myrheem.com", "ruud.com"]]
+
+
+def test_a_redo_keeps_a_new_start_page_on_a_site_already_known(runtime_conn):
+    name, brand_id = new_brand(runtime_conn)
+    run_discover(runtime_conn, FakeDiscoverAI(GOOD), name, now=T0)
+    new_page = "https://www.ruud.com/products/water_heaters/"
+    run_discover(runtime_conn, FakeDiscoverAI(found(starts=[new_page])), name, now=T0 + timedelta(days=91))
+    assert any(row[0] == new_page and row[1] == "discover" for row in start_urls(runtime_conn, brand_id))
+
+
+def test_the_redo_question_lists_the_known_sites_and_asks_only_for_new_ones():
+    from crawler.ai import discover_question
+    text = discover_question("Ruud", [], known=["files.myrheem.com", "ruud.com"])
+    assert "files.myrheem.com" in text and "ruud.com" in text and "new" in text.lower()
+    assert discover_question("Ruud", []) == "Brand: Ruud"  # a first discovery asks the same as before
 
 
 # ---------------------------------------------------------------- Q7: which model
