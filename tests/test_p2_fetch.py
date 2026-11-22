@@ -453,6 +453,39 @@ def test_last_modified_is_sent_back_as_if_modified_since(ruud):
     assert ruud.site.hits("/m")[-1]["headers"].get("if-modified-since") == stamp
 
 
+def test_a_redirected_file_is_rechecked_at_its_final_address_with_its_etag(ruud):
+    # Prod 2026-11-21: 1,314 fetched PDFs (6,286 pages in all) are reached through a redirect; the ETag was only sent
+    # on the first hop, so every 30-day recheck downloaded the whole file again just to find the same bytes.
+    def final(rec):
+        if rec["headers"].get("if-none-match") == '"v1"':
+            return 304, {"ETag": '"v1"'}, b""
+        return 200, {"ETag": '"v1"', "Content-Type": "text/html"}, HTML
+
+    ruud.site.route("/old", b"", status=301, headers={"Location": "/new"})
+    ruud.site.route("/new", final)
+    assert get(ruud, "/old").outcome == "fetched"
+    again = get(ruud, "/old")
+    assert again.outcome == "not_modified"
+    assert ruud.site.hits("/new")[-1]["headers"].get("if-none-match") == '"v1"'
+
+
+def test_validators_are_not_sent_to_a_new_redirect_target(ruud):
+    # /latest moved from v1 to v2: v1's ETag and date must not be offered to v2, which could answer 304 wrongly
+    seen = []
+
+    def target(rec):
+        seen.append(rec["headers"].get("if-none-match"))
+        return 200, {"ETag": '"v2"', "Content-Type": "text/html"}, HTML + b"<!-- v2 -->"
+
+    ruud.site.route("/latest", b"", status=302, headers={"Location": "/v1"})
+    ruud.site.route("/v1", lambda rec: (200, {"ETag": '"v1"', "Content-Type": "text/html"}, HTML))
+    assert get(ruud, "/latest").outcome == "fetched"
+    ruud.site.route("/latest", b"", status=302, headers={"Location": "/v2"})
+    ruud.site.route("/v2", target)
+    assert get(ruud, "/latest").outcome == "fetched"
+    assert seen == [None]
+
+
 def test_a_server_that_ignores_conditionals_is_compared_by_hash(ruud):
     state = {"body": HTML}
     ruud.site.route("/h", lambda rec: (200, {"Content-Type": "text/html"}, state["body"]))

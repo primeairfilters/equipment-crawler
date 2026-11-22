@@ -214,12 +214,12 @@ class Fetcher:
 
     def _page(self, brand_id, url):
         rows = self._rows(
-            "SELECT id, content_sha, etag, last_modified, is_pdf, fail_count FROM pages WHERE brand_id = %s AND url_sha = %s",
-            (brand_id, _sha(url)))
+            "SELECT id, content_sha, etag, last_modified, is_pdf, fail_count, final_url FROM pages "
+            "WHERE brand_id = %s AND url_sha = %s", (brand_id, _sha(url)))
         if not rows:
             return None
         return {"id": rows[0][0], "content_sha": rows[0][1], "etag": rows[0][2], "last_modified": rows[0][3], "is_pdf": rows[0][4],
-                "fail_count": rows[0][5]}
+                "fail_count": rows[0][5], "final_url": rows[0][6]}
 
     def due_info(self, brand_id, url):
         """(due, page_id). Not due when the page was checked recently and its next check is still ahead."""
@@ -547,7 +547,9 @@ class Fetcher:
                                 raise _Refused("robots")
                         current = final
                 else:
-                    if hop == 0 and existing and existing["content_sha"] and (
+                    # the ETag and date belong to the address that answered them: the first hop, or the final one a
+                    # redirect reached last time (2026-11-21: 1,314 redirected PDFs were downloaded whole on each recheck)
+                    if existing and existing["content_sha"] and (hop == 0 or current == existing["final_url"]) and (
                             not existing["is_pdf"] or not library.configured() or library.has_file(existing["content_sha"])):
                         if existing["etag"]:
                             conditional["If-None-Match"] = existing["etag"]
