@@ -253,3 +253,11 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   2026-11-22 02:12 and 2026-11-29 02:11 UTC, when Trane's turn comes.
 - **Check again after run 52 ends:** the report's `needs_you` and reread count, AirStage pages, Trane pages fetched
   through the API.
+
+**16:01 UTC the same day:** run 52 was still running after 9 hours. It had fetched 6,287 pages across 49 brands and
+made 2,916 new documents. The capped spend reached exactly $50.00, so link check and tagging stop until Dec 1. This
+run: link check 1,152 calls, 0 rejected; tagging 3,600 batch requests, $1.27, 0 rejected; gap-fill 145 searches, $1.79.
+AirStage is `crawled` (12:52 UTC): 137 pages fetched, 0 failed this run, 0 PDFs. 80 are past the depth limit and 13
+wait for the link check, which is now capped. Trane is not reached yet: 0 pages this run, and its help center is
+still 1 fetched / 2,494 failed. Unembedded sections rose to 13,439 of 305,790 because new sections were built. They
+get embedded at the end of the run, from the $1.20 left of the embedding $5.
