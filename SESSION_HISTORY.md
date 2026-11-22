@@ -218,9 +218,8 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   one full rebuild. A trade-off for the user.
 - **After the next runs** (needs "Run all the time" back on): check the Fujitsu/AirStage page went from `waiting` to
   crawled (`control.start_page_status`), Trane articles arrive through the help-center API (1 fetched, 2,494 failed
-  on 2026-11-22 06:54 UTC), and the 48,201 unembedded sections got vectors. The link check and tagging only run again
-  when the $50 cap resets on Dec 1; then check the link check's `rejected` share is near 0 and the first tagging
-  batch stays under the new per-pass limits.
+  on 2026-11-22 06:54 UTC), and the 48,201 unembedded sections got vectors. (Link check and tagging ran again
+  on 2026-11-22, see the after-deploy check below.)
 - Model numbers shorter than 6 characters shared by two brands are never linked across brands.
 - Eaton and Baldor time out even from a desktop with the crawler's honest name: bot blocking, nothing honest to fix.
 - `www.www.nortekair.com` and `www.www.lennoxpros.com` are typo hosts from discovery.
@@ -228,3 +227,29 @@ Built and tested locally unless marked deployed; all go out with `./deploy.sh`.
   is flaky:** it failed twice on 2026-11-21 (the plan had no `section_vectors_te3s_1536_hnsw`) and passed in a later
   run with no change to search. It reads the testing database's query plan, which depends on what that database holds
   at the time. Do not read a failure of it as a broken search without running it again.
+
+### After-deploy check, 2026-11-22 08:53 UTC (prod, read-only)
+
+- **Run 52 started 06:58 UTC and was still running** at 08:53 (`crawl.runs`), so its report and `needs_you` weren't
+  written yet; the results below are read from the data. In two hours it fetched 1,611 pages across 9 brands
+  (C.H.I. to Carrier, alphabetical); Fujitsu and Trane hadn't had their turn yet.
+- **The AI work started again before Dec 1.** Leaving embedding out of the $50 cap dropped the counted spend from
+  $50+ to $46.77, so the capped steps ran until the cap: $47.94 by 08:53. This is a side effect of the embedding
+  change, not a bug: the $50 still holds.
+- **Link check fixed:** 180 calls this run, 0 rejected (was 28,131 of 32,738).
+- **Tagging under the new limits:** one batch of 940 requests, $0.41, largest answer 991 tokens, 0 rejected.
+- **Embedding:** unembedded live sections went from 48,201 to 6,044 (of 298,576). 763 embedding calls this run
+  ($0.50); November embedding spend is $3.80 of its own $5, so roughly $1.20 is left for the remaining 6,044.
+- **Free model links:** `link_known_models` checked 2,206 manuals and gave 454 of them their own brand's models
+  (2,677 links). The sister-brand step made 3,229 links under other brands on 467 manuals. Another 3,560 own-brand
+  links on manuals that already had models arrived this run, most likely from the sister-brand step linking a key
+  back to the document's own brand (a guess, not checked).
+- **Crawled Word files are kept:** 10 new .docx documents this run (15 total); no new .xlsx yet.
+- **Reread:** 77 PDFs still have no text. Reread can't be told apart from other updates in `documents.updated_at`;
+  the run report's count will show it.
+- **AirStage (Fujitsu):** the start page went from `waiting` to `crawling` (start URL made 06:58), but 0 pages
+  fetched so far, because Fujitsu hadn't had its turn yet.
+- **Trane help center:** still 1 fetched, 2,494 failed (all `http_403`), none tried this run. Retries are due between
+  2026-11-22 02:12 and 2026-11-29 02:11 UTC, when Trane's turn comes.
+- **Check again after run 52 ends:** the report's `needs_you` and reread count, AirStage pages, Trane pages fetched
+  through the API.
