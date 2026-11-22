@@ -8,7 +8,9 @@
   upkeep (a round with no new manual, no search made and nothing queued).
 - Site search: record_search_form notes a brand page's own search form (a GET form with a query box, posting to the
   same site); site_search then searches it for uncovered families, a few each run, each family once every
-  SEARCH_AGAIN_AFTER, as start addresses crawled like any other (robots.txt and the polite gap hold).
+  SEARCH_AGAIN_AFTER, as start addresses crawled like any other (robots.txt and the polite gap hold). A search the
+  site's robots.txt forbids is never queued, and a search whose results keep failing (FAILS_BEFORE_DROP tried, none
+  read) is dropped, its untried searches stopped (prod 2026-11-21: 424 site searches had never once been read).
 
 Nothing here commits; callers do.
 """
@@ -30,6 +32,7 @@ PULL_EVERY = timedelta(days=30)
 SEARCH_AGAIN_AFTER = timedelta(days=180)
 SITE_SEARCHES_PER_RUN = 10
 SITE_SEARCH_DEPTH = 2  # the results page, the product page, its PDFs
+FAILS_BEFORE_DROP = 3
 QUERY_NAMES = {"q", "s", "search", "query", "keyword", "keywords", "term", "k", "searchterm", "text"}
 _WILDCARD = re.compile(r"[*?#]")
 _COVERED_SQL = (  # the family has a manual: a document's model key is a 5+ character prefix of one of its models
@@ -268,12 +271,46 @@ def record_search_form(conn, brand_id, page_url, body):
     return template
 
 
+def _robots_forbids(conn, host, url):
+    """True when the host's saved robots.txt (a 2xx answer) forbids the address. No saved answer, or one the fetcher
+    treats as a passing failure, is not a reason to drop a search: the fetcher still checks every request."""
+    from protego import Protego
+    from crawler.fetch import ROBOTS_TOKEN
+    row = _rows(conn, "SELECT robots_status, robots_body, ignore_robots FROM hosts WHERE host = %s", (host,))
+    if not row or row[0][2] or row[0][0] is None or not 200 <= row[0][0] < 300:
+        return False
+    return not Protego.parse(row[0][1] or "").can_fetch(url, ROBOTS_TOKEN)
+
+
+def _keeps_failing(conn, brand_id, template):
+    """True when FAILS_BEFORE_DROP or more of this search's pages were tried and none was ever read (an address that
+    answers with data, or keeps refusing)."""
+    base = template.split("{q}", 1)[0]
+    tried, read = _rows(conn, "SELECT COUNT(p.id), COUNT(p.fetched_at) FROM site_searches s JOIN pages p "
+                              "ON p.brand_id = s.brand_id AND p.url = s.url WHERE s.brand_id = %s AND left(s.url, %s) = %s",
+                        (brand_id, len(base), base))[0]
+    return tried >= FAILS_BEFORE_DROP and not read
+
+
+def _usable(conn, brand_id, host, template):
+    """A search that can work. One that cannot has its queued searches stopped, so no run tries them again."""
+    if not _robots_forbids(conn, host, template.replace("{q}", "x")) and not _keeps_failing(conn, brand_id, template):
+        return True
+    base = template.split("{q}", 1)[0]
+    _rows(conn, "UPDATE start_urls SET status = 'stopped' WHERE brand_id = %s AND found_by = 'gapfill' AND status = 'active' "
+                "AND url IN (SELECT url FROM site_searches WHERE brand_id = %s AND left(url, %s) = %s)",
+          (brand_id, brand_id, len(base), base))
+    return False
+
+
 def site_search(conn, brand_id, *, now=None, limit=None):
     """Search the brand's own sites for uncovered families; each search is a start address. Returns how many."""
     now, limit = now or _now(), limit if limit is not None else SITE_SEARCHES_PER_RUN
-    templates = _rows(conn, "SELECT t.template FROM site_search_templates t JOIN brand_domains d ON d.brand_id = t.brand_id "
-                            "AND d.host = t.host AND d.status = 'approved' AND d.scope = 'all' WHERE t.brand_id = %s "
-                            "ORDER BY t.host", (brand_id,))
+    templates = [(t,) for host, t in _rows(
+        conn, "SELECT t.host, t.template FROM site_search_templates t JOIN brand_domains d ON d.brand_id = t.brand_id "
+              "AND d.host = t.host AND d.status = 'approved' AND d.scope = 'all' WHERE t.brand_id = %s "
+              "ORDER BY t.host", (brand_id,))
+        if _usable(conn, brand_id, host, t)]
     if not templates:
         return 0
     done = 0

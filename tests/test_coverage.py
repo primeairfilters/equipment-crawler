@@ -157,6 +157,68 @@ def test_site_search_queues_a_search_per_uncovered_family_a_few_each_run(energys
     assert site_search(world.conn, world.brand_id, now=T0 + timedelta(days=181)) == 1
 
 
+# Prod 2026-11-21: 214 site-search pages were refused by robots.txt every night (Lennox `Disallow: /*?q=`, 141; Haier
+# `Disallow: /search`, 50) and 210 LG China search pages answered with data, not a page, and failed every time.
+
+def _template(world):
+    q(world.conn, "INSERT INTO site_search_templates (brand_id, host, template, found_on) VALUES (%s, 'ruud.test', "
+                  "'https://ruud.test/search?q={q}', 'https://ruud.test/')", (world.brand_id,))
+
+
+def _searched_before(world, state, n):
+    """n earlier site searches on ruud.test whose start pages ended in `state` (None: never tried yet)."""
+    import hashlib
+    host_id = world.fetcher()._host_row("ruud.test")["id"]
+    for i in range(n):
+        fam = f"{(state or 'new')[:3].upper()}{i:03d}"
+        url = f"https://ruud.test/search?q={fam}"
+        sha = hashlib.sha256(url.encode()).hexdigest()
+        q(world.conn, "INSERT INTO site_searches (brand_id, family, searched_at, url) VALUES (%s, %s, %s, %s)",
+          (world.brand_id, fam, T0 - timedelta(days=3), url))
+        q(world.conn, "INSERT INTO start_urls (brand_id, url, url_sha, found_by, depth) VALUES (%s, %s, %s, 'gapfill', 1)",
+          (world.brand_id, url, sha))
+        if state:
+            q(world.conn, "INSERT INTO pages (brand_id, host_id, url, url_sha, fetch_state, fail_reason, fetched_at) "
+                          "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+              (world.brand_id, host_id, url, sha, state, "bad_content_type" if state == "failed" else None,
+               T0 if state == "fetched" else None))
+
+
+def test_site_search_skips_a_search_page_the_sites_robots_txt_forbids(energystar):
+    from crawler.coverage import site_search
+    world = energystar
+    pull(world)
+    _template(world)
+    host_id = world.fetcher()._host_row("ruud.test")["id"]
+    q(world.conn, "UPDATE hosts SET robots_status = 200, robots_body = %s, robots_fetched_at = %s WHERE id = %s",
+      ("User-agent: *\nDisallow: /*?q=\n", T0, host_id))
+    _searched_before(world, None, 2)  # saved before this rule: refused every night, so stopped now
+    assert site_search(world.conn, world.brand_id, now=T0) == 0
+    assert q(world.conn, "SELECT status, COUNT(*) FROM start_urls WHERE brand_id = %s GROUP BY 1",
+             (world.brand_id,)) == (("stopped", 2),)
+
+
+def test_a_site_search_whose_pages_keep_failing_is_dropped_and_its_waiting_pages_stopped(energystar):
+    from crawler.coverage import site_search
+    world = energystar
+    pull(world)
+    _template(world)
+    _searched_before(world, "failed", 3)
+    assert site_search(world.conn, world.brand_id, now=T0) == 0
+    assert q(world.conn, "SELECT DISTINCT status FROM start_urls WHERE brand_id = %s", (world.brand_id,)) == (("stopped",),)
+
+
+def test_a_site_search_that_worked_once_or_is_not_tried_yet_is_kept(energystar):
+    from crawler.coverage import site_search
+    world = energystar
+    pull(world)
+    _template(world)
+    _searched_before(world, "failed", 3)
+    _searched_before(world, "fetched", 1)
+    _searched_before(world, None, 5)
+    assert site_search(world.conn, world.brand_id, now=T0) > 0
+
+
 def test_site_search_only_uses_a_site_approved_for_its_pages(energystar):
     from crawler.coverage import site_search
     world = energystar
