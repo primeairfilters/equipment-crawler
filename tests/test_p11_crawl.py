@@ -68,6 +68,38 @@ def test_a_start_address_can_go_deeper_or_shallower(world):
     assert state(world, "/l1")[0] == "beyond_depth"
 
 
+def test_a_pdf_one_step_past_the_depth_is_still_fetched_but_a_page_is_not(world):
+    # Prod 2026-11-21: 10,343 PDF links sat as beyond_depth (8,014 of 9,947 start addresses are depth 1), each linked
+    # from a brand page already read. A PDF is a dead end, so taking it costs one download and no link check.
+    start(world, depth=1)
+    serve(world, "/start", "/l0")
+    serve(world, "/l0", ("/manual.pdf", "Installation manual"), "/l1")
+    serve_pdf(world, "/manual.pdf")
+    serve(world, "/l1")
+    checker = Checker()
+    crawl(world, checker=checker)
+    assert world.url("ruud.test", "/manual.pdf") not in checker.asked()  # no paid link check for it
+    assert paths(world) == ["/start", "/l0", "/manual.pdf"]
+    assert state(world, "/manual.pdf")[0] == "fetched"
+    assert state(world, "/l1")[0] == "beyond_depth"
+
+
+def test_a_pdf_left_beyond_the_depth_by_an_earlier_run_is_fetched_on_the_next(world):
+    start(world, depth=1)
+    serve(world, "/start", "/l0")
+    serve(world, "/l0", ("/manual.pdf", "Installation manual"))
+    serve_pdf(world, "/manual.pdf")
+    crawl(world)
+    with world.conn.cursor() as cur:  # as an earlier run left it: recorded, never requested
+        cur.execute("UPDATE pages SET fetch_state = 'beyond_depth', fetched_at = NULL, next_check_at = NULL, "
+                    "content_sha = NULL, decision = NULL, decided_by = NULL, decision_reason = NULL "
+                    "WHERE brand_id = %s AND url = %s",
+                    (world.brand_id, world.url("ruud.test", "/manual.pdf")))
+    crawl(world)  # /l0 is not due again, so its known links are walked
+    assert paths(world).count("/manual.pdf") == 2 and paths(world).count("/l0") == 1
+    assert state(world, "/manual.pdf")[0] == "fetched"
+
+
 def test_links_past_the_page_limit_are_recorded_and_the_run_says_so(world):
     sid = start(world)
     links = [f"/p{n}" for n in range(8)]

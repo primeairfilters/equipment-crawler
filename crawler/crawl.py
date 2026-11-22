@@ -354,7 +354,9 @@ class _StartCrawl:
             self._link(from_id, row_id, text)
             if _seen_key(url) in self.seen:
                 continue
-            if depth > self.max_depth:
+            # a PDF one step past the depth is still taken: a dead end, linked from a page already read (2026-11-21:
+            # 10,343 PDF links sat as beyond_depth on prod)
+            if depth > self.max_depth and not (depth == self.max_depth + 1 and is_pdf_link(url)):
                 if not fetched:
                     _rows(self.conn, "UPDATE pages SET fetch_state = 'beyond_depth' WHERE id = %s "
                                      "AND fetch_state IN ('queued', 'over_limit', 'ask_ai')", (row_id,))
