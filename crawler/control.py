@@ -49,6 +49,40 @@ def sync(conn):
     return linked
 
 
+def find_websites(conn, client, *, now=None, cap_usd=None, after_brand=None, time_up=None):
+    """LIVE_CAMERA_CIRCLE D14 (the user, 2026-11-22): look up where brands publish, first thing in a run and in this
+    order, until the cap is short: (1) new brands Breeze missed, (2) brands never looked up, (3) the 90-day redo of
+    brands looked up before (discover.REDO_AFTER; it never ran from the nightly run before this). Active brands within
+    their own monthly budget only. A brand with a start page the user typed and never looked up is still not asked
+    (P19). Returns [(name, decided, waiting)] for the run report."""
+    from datetime import datetime, timezone
+
+    from crawler.discover import REDO_AFTER
+    from crawler.misses import ADDED_BY_MISS
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    due = _rows(conn, "SELECT b.id, b.name FROM brands b LEFT JOIN control.brands c ON c.crawl_brand_id = b.id "
+                      "WHERE b.status = 'active' AND ((b.discovered_at IS NULL AND NOT EXISTS (SELECT 1 FROM start_urls s "
+                      "WHERE s.brand_id = b.id)) OR b.discovered_at <= %s) AND (SELECT COALESCE(SUM(a.cost_usd), 0) "
+                      "FROM ai_calls a WHERE a.brand_id = b.id AND a.created_at >= %s) < b.monthly_budget_usd "
+                      "ORDER BY CASE WHEN b.discovered_at IS NULL AND c.added_by = %s THEN 0 "
+                      "WHEN b.discovered_at IS NULL THEN 1 ELSE 2 END, b.discovered_at, b.created_at, b.id",
+                (now - REDO_AFTER, month, ADDED_BY_MISS))
+    report = []
+    for brand_id, name in due:
+        if time_up is not None and time_up():
+            break
+        outcome = []
+        decided, waiting = discover_brand(conn, client, brand_id, name, now=now, cap_usd=cap_usd, outcome=outcome)
+        if after_brand is not None:
+            after_brand()
+        if outcome == ["budget"]:
+            break
+        if outcome == ["found"]:
+            report.append((name, decided, waiting))
+    return report
+
+
 USER_PAGE = "you added a page on it"
 NEVER_CRAWL = "That website is on the never-crawl list."
 
@@ -101,11 +135,14 @@ def own_site(brand, host):
     return bool(words) and "".join(words) in labels
 
 
-def discover_brand(conn, client, brand_id, name):
+def discover_brand(conn, client, brand_id, name, *, now=None, cap_usd=None, outcome=None):
     """Ask where the brand publishes and approve its own site. Returns [(host, state, reason)] for the report, and
-    [host] of the hosts found that wait for the user (automatic approval off)."""
+    [host] of the hosts found that wait for the user (automatic approval off). `outcome`, a list, gets what discover
+    said ("budget", "recent", "unusable" or "found"), so a caller looking up many brands can stop at the cap."""
     from crawler.discover import discover
-    found = discover(conn, client, name)
+    found = discover(conn, client, name, now=now, cap_usd=cap_usd)
+    if outcome is not None:
+        outcome.append(found if isinstance(found, str) else "found")
     if not isinstance(found, dict):
         return [], []
     waiting = [h for (h,) in _rows(conn, "SELECT host FROM brand_domains WHERE brand_id = %s AND status = 'waiting' "

@@ -84,6 +84,35 @@ like) matter far more than brand number 350.
 - **Three reviewers on separate parts** (AI spending, downloading, reading) found leads fast; their guesses about
   causes were wrong about half the time, so verify each on prod before building.
 
+## 2026-11-22 — LIVE_CAMERA_CIRCLE.md phase 6: brands from misses, websites looked up first
+
+The goal above the theme is now the circle that ends at Live Camera (see CLAUDE.md). The spec is in HVACApp
+`Obsidian Tracforce/LIVE_CAMERA_CIRCLE.md`, D13 and D14.
+
+- **Found:** 246 of 406 prod brands were never looked up. Website finding last ran 2026-11-11, because the $50 cap ran
+  out and it only happens at a brand's own turn.
+- **Found:** the 90-day redo (`discover.REDO_AFTER`) never ran from the nightly run. `auto.py` only calls discovery
+  for brands never looked up; the redo ran only with `./crawl discover` by hand.
+- **Built — website finding goes first** (`control.find_websites`, first step of `auto.start_of_run`, beside the
+  workers as decided 2026-11-07). The order is: (1) brands added from Breeze misses, (2) never looked up, (3) due their
+  90-day redo. It stops at the cap or the window, skips brands over their own monthly budget, and still never asks
+  about a brand with a typed start page and no lookup (P19).
+  - Measured: ~25 s a lookup on Nov 11, so prod's 246 take ~1.7 h and ~$9. The workers spent ~$2.30 in run 52's first
+    2 hours, so it fits well inside the $50.
+  - `tests/test_find_websites.py`: the order test was shown to fail with the order broken.
+- **Built — brands from misses:**
+  - `misses.close_brands`: tested against the 406 prod names. 18 of 18 misheard names came out close or exact; real
+    brands we lack came out not close.
+  - Nothing close → `add_brand(..., added_by='breeze miss')`, kind `brand_added`, looked up first next run.
+  - Close → kind `close_brand`, with every close brand, nearest spelling first, for the user on the admin Breeze
+    misses tab.
+  - No letters, or over 60 characters → `uncovered_brand` as before.
+  - `crawl_brand` now also matches a name written another way ("QUILLMAR, Inc." = Quillmar), which only worked
+    before if a manufacturer alias existed.
+  - Migration `0041_miss_brand_kinds.sql` (CHECK swap).
+- **Still open:** prod has 2 test brands from `e2e-superadmin@example.com` among the 246; they'll be looked up too.
+  Nothing removes them.
+
 ## 2026-11-21
 
 Built and tested locally unless marked deployed; all go out with `./deploy.sh`.

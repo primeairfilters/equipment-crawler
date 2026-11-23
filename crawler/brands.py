@@ -45,7 +45,7 @@ def _brand_or_fail(conn, name):
     return brand_id
 
 
-def add_brand(conn, name):
+def add_brand(conn, name, added_by="command line"):
     name = " ".join(name.split())
     if not name:
         raise ValueError("A brand needs a name.")
@@ -56,9 +56,9 @@ def add_brand(conn, name):
         (name, brand_key(name)),
     )[0][0]
     # the admin page lists every brand (P19): a brand added here gets its row there, or is linked to the page's own
-    _exec(conn, "INSERT INTO control.brands (name, added_by, crawl_brand_id) VALUES (%s, 'command line', %s) "
+    _exec(conn, "INSERT INTO control.brands (name, added_by, crawl_brand_id) VALUES (%s, %s, %s) "
                 "ON CONFLICT (name_key) DO UPDATE SET crawl_brand_id = COALESCE(control.brands.crawl_brand_id, "
-                "EXCLUDED.crawl_brand_id)", (name, brand_id))
+                "EXCLUDED.crawl_brand_id)", (name, added_by, brand_id))
     return brand_id
 
 

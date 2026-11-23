@@ -76,14 +76,49 @@ def test_the_admin_page_reads_the_misses(admin_conn, migrate_conn):
     assert privileges(migrate_conn, "eq_admin", "control.breeze_misses") == {"SELECT"}
 
 
-def test_a_brand_the_crawler_does_not_have_is_listed_for_the_user(runtime_conn):
-    from crawler.misses import uncovered_brands
+# LIVE_CAMERA_CIRCLE.md D13 (the user, 2026-11-22): a brand Breeze missed is compared with the brands the crawler has.
+# Exact (normalized) is that brand; close is NOT added and waits for the user with every close brand, nearest spelling
+# first (a nearest-only list sent "Bryan" to Broan, not Bryant); nothing close is added and looked up first (D14).
+# Before, every unknown brand was only listed for the user.
+
+def test_a_brand_with_nothing_close_is_added_for_a_website_lookup(runtime_conn):
     first = miss(runtime_conn, "Defrost board pinout?", brand="Zorbex Nowhere Brand")
-    miss(runtime_conn, "Error 7?", brand="Zorbex Nowhere Brand")
-    assert sort(runtime_conn, client=Judge())["uncovered_brand"] == 2
-    assert sorted_as(runtime_conn, first)[:2] == ("sorted", "uncovered_brand")
-    assert ("Zorbex Nowhere Brand", 2) in uncovered_brands(runtime_conn)
-    assert q(runtime_conn, "SELECT COUNT(*) FROM brands WHERE name_key = 'zorbex nowhere brand'")[0][0] == 0
+    assert sort(runtime_conn, client=Judge())["brand_added"] == 1
+    state, kind, detail, _ = sorted_as(runtime_conn, first)
+    assert (state, kind, detail) == ("sorted", "brand_added", {"brand": "Zorbex Nowhere Brand"})
+    assert q(runtime_conn, "SELECT b.status, b.discovered_at, c.added_by FROM brands b JOIN control.brands c "
+                           "ON c.crawl_brand_id = b.id WHERE b.name_key = 'zorbex nowhere brand'") == \
+        (("active", None, "breeze miss"),)
+
+
+def test_a_close_name_is_not_added_and_waits_with_every_close_brand_nearest_first(runtime_conn):
+    from crawler.brands import add_brand
+    add_brand(runtime_conn, "Varnok")
+    add_brand(runtime_conn, "Varnoks Pumps")
+    asked = miss(runtime_conn, "Error 7?", brand="Varnoks")
+    assert sort(runtime_conn, client=Judge())["close_brand"] == 1
+    state, kind, detail, _ = sorted_as(runtime_conn, asked)
+    assert (state, kind) == ("sorted", "close_brand")
+    assert detail == {"brand": "Varnoks", "close": ["Varnok", "Varnoks Pumps"]}  # 1 letter off, then a longer name
+    assert q(runtime_conn, "SELECT COUNT(*) FROM brands WHERE name_key = 'varnoks'")[0][0] == 0
+
+
+def test_a_brand_written_another_way_is_the_brand_we_have(runtime_conn):
+    from crawler.brands import add_brand
+    add_brand(runtime_conn, "Quillmar")
+    asked = miss(runtime_conn, "Error 7?", brand="QUILLMAR, Inc.")
+    sort(runtime_conn, client=Judge())
+    assert sorted_as(runtime_conn, asked)[1] not in ("brand_added", "close_brand", "uncovered_brand")
+    assert q(runtime_conn, "SELECT COUNT(*) FROM brands WHERE name_key LIKE 'quillmar%%'")[0][0] == 1
+
+
+def test_a_brand_name_with_no_letters_is_never_added(runtime_conn):
+    from crawler.misses import uncovered_brands
+    asked = miss(runtime_conn, "Error 7?", brand="12345")
+    sort(runtime_conn, client=Judge())
+    assert sorted_as(runtime_conn, asked)[1] == "uncovered_brand"
+    assert ("12345", 1) in uncovered_brands(runtime_conn)
+    assert q(runtime_conn, "SELECT COUNT(*) FROM brands WHERE name_key = '12345'")[0][0] == 0
 
 
 def test_a_model_with_no_manual_gets_one_search_and_a_repeat_gets_none(world):

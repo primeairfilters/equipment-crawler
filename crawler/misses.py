@@ -1,8 +1,10 @@
 """P21 (D77): what Breeze could not answer becomes crawl work and eval questions.
 
 Breeze's tool writes a miss (breeze.misses) when its search gives up. Each run sorts the new ones:
-- uncovered_brand: a brand the crawler does not have. Brands are the user's: the admin page lists it, the run report
-  names it; the crawler never adds it.
+- A brand the crawler does not have (LIVE_CAMERA_CIRCLE D13, the user 2026-11-22; before, it was only listed):
+  close_brand when its name is close to brands we have (every close one listed, nearest first, for the user to pick);
+  brand_added when nothing is close (added, and its website looked up first in the next run, D14); uncovered_brand when
+  the name can't be a brand (no letters, or a sentence): listed for the user as before.
 - no_manual: a model none of the brand's manuals names. One gap-fill search for its family (gapfill.search_family),
   at most SEARCHES_PER_DAY; what it finds is crawled the next night. A later miss on the same model within
   REPEAT_WINDOW is a repeat of it, not another search.
@@ -14,6 +16,7 @@ call is logged in ai_calls inside the monthly cap. Nothing here commits; after_m
 """
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -27,6 +30,8 @@ REPEAT_WINDOW = timedelta(days=30)
 MAX_TOKENS = 300
 SECTION_CHARS = 1200
 DEFAULT_CAP_USD = "50"
+ADDED_BY_MISS = "breeze miss"  # control.brands.added_by of a brand added from a miss: its website is looked up first
+MAX_NEW_BRAND_NAME = 60  # longer is a sentence, not a brand
 
 MISS_SYSTEM = (
     "You check whether a service technician's question is answered by any of the numbered sections from equipment "
@@ -57,6 +62,11 @@ def crawl_brand(conn, name):
     found = _rows(conn, "SELECT id, name FROM brands WHERE name_key = %s", (brand_key(name),))
     if found:
         return found[0]
+    # the same name written another way ("QUILLMAR, Inc." for Quillmar): equal once normalized (LIVE_CAMERA_CIRCLE D13)
+    key = alias_key(name)
+    for brand_id, brand in _rows(conn, "SELECT id, name FROM brands ORDER BY id"):
+        if key and alias_key(brand) == key:
+            return brand_id, brand
     maker = _rows(conn, "SELECT manufacturer_id FROM manufacturer_aliases WHERE alias_key = %s", (alias_key(name),))
     if not maker:
         return None
@@ -67,19 +77,66 @@ def crawl_brand(conn, name):
     return None
 
 
+def _spelling_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def close_brands(conn, name):
+    """The crawler's brands whose names are close to this one, nearest spelling first (LIVE_CAMERA_CIRCLE D13): the
+    same first word of 4+ letters, one name being the other plus more words, or 1 letter off (2 for names over 6
+    letters). Tested 2026-11-22 against the 406 prod brands: 18 of 18 misheard or reworded names came out close or
+    exact; real brands we don't have (Fieldpiece, Fluke, Testo) came out with nothing close."""
+    key = alias_key(name)
+    if not key:
+        return []
+    flat, first = key.replace(" ", ""), key.split()[0]
+    close = []
+    for (brand,) in _rows(conn, "SELECT name FROM brands ORDER BY name"):
+        other = alias_key(brand)
+        if not other or other == key:
+            continue
+        other_flat = other.replace(" ", "")
+        distance = _spelling_distance(flat, other_flat)
+        if ((len(first) >= 4 and first == other.split()[0]) or other.startswith(key + " ")
+                or key.startswith(other + " ") or distance <= (1 if min(len(flat), len(other_flat)) <= 6 else 2)):
+            close.append((distance, brand))
+    return [brand for _, brand in sorted(close)]
+
+
+def _can_be_a_brand(name):
+    """A name worth adding: has letters and isn't a sentence."""
+    return bool(re.search(r"[A-Za-z]", name)) and len(" ".join(name.split())) <= MAX_NEW_BRAND_NAME
+
+
 def sort_misses(conn, *, client=None, embedder=None, now=None, cap_usd=None, after_miss=None):
     """Sort the new misses. Returns {kind: count} for those sorted this time, plus "waiting"."""
     now = now or _now()
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     searches = _rows(conn, "SELECT COUNT(*) FROM ai_calls WHERE purpose = 'miss_search' AND created_at >= %s", (day,))[0][0]
     checks = _rows(conn, "SELECT COUNT(*) FROM ai_calls WHERE purpose = 'miss_check' AND created_at >= %s", (day,))[0][0]
-    out = {"uncovered_brand": 0, "no_manual": 0, "search_missed": 0, "not_in_manuals": 0, "repeat": 0, "waiting": 0}
+    out = {"uncovered_brand": 0, "brand_added": 0, "close_brand": 0, "no_manual": 0, "search_missed": 0,
+           "not_in_manuals": 0, "repeat": 0, "waiting": 0}
     for miss_id, question, brand, model in _rows(
             conn, "SELECT id, question, brand, model FROM breeze.misses WHERE state = 'new' ORDER BY id"):
         kind, detail, repeat_of, wait = None, {}, None, False
         found = crawl_brand(conn, brand) if brand else None
         if brand and found is None:
-            kind, detail = "uncovered_brand", {"brand": brand}
+            # LIVE_CAMERA_CIRCLE D13: close waits for the user, nothing close is added and looked up first (D14)
+            close = close_brands(conn, brand)
+            if close:
+                kind, detail = "close_brand", {"brand": brand, "close": close}
+            elif _can_be_a_brand(brand):
+                from crawler.brands import add_brand
+                add_brand(conn, brand, added_by=ADDED_BY_MISS)
+                kind, detail = "brand_added", {"brand": " ".join(brand.split())}
+            else:
+                kind, detail = "uncovered_brand", {"brand": brand}
         elif model and len(model_key(model)) >= 5:
             from crawler.search import model_documents
             from crawler.store import brand_manufacturer

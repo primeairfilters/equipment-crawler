@@ -133,6 +133,9 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     def start_of_run():
         """Beside the workers, not before them (user 2026-11-07: prod run 19's worker cards sat idle while the run
         re-read every PDF with a parse issue). Returns the parse-issue retry's counts."""
+        if ai_client is not None:  # first: brands Breeze missed, then never looked up, then the 90-day redo (D14)
+            summary["websites_found"] = step("finding where brands publish",
+                                             lambda: _find_websites(conn, ai_client, summary, commit)) or 0
         summary["uploads"] = step("uploads", lambda: _uploads(conn, commit)) or {"added": 0, "already_had": 0,
                                                                                  "rejected": 0}
         retried = step("retrying parse issues after code changes", lambda: _retry_issues(conn, commit)) or {}
@@ -265,6 +268,9 @@ def _run(conn, fetcher, link_checker, ai_client, embedder, owner_connect, commit
     for brand, count in sorted_misses.get("uncovered", []):
         summary["needs_you"].append(f"Breeze was asked about {brand} {count} time(s), a brand the crawler does not "
                                     "have: add it on the admin page if you want it")
+    if sorted_misses.get("close_brand"):
+        summary["needs_you"].append(f"{sorted_misses['close_brand']} brand name(s) Breeze was asked about are close to "
+                                    "brands we have: pick one on the admin page's Breeze misses tab")
     found = step("parse issues", lambda: _scan_issues(conn, now)) or {}
     summary["issues"] = {"open": found.get("open", 0), "new": found.get("new", 0),
                          "retried": retried.get("retried", 0), "fixed": retried.get("fixed", 0) + found.get("fixed", 0)}
@@ -314,6 +320,22 @@ def _coverage(conn, fetcher, client, brand_id, name, first_document, run_id, now
 def _sync(conn):
     from crawler.control import sync
     sync(conn)
+
+
+def _find_websites(conn, client, summary, commit):
+    """LIVE_CAMERA_CIRCLE D14: where brands publish, looked up first in a run, in the user's order, until the cap or
+    the window runs out (measured 2026-11-22: ~25 s a brand, so prod's 246 waiting take ~1.7 h and ~$9, beside the
+    workers, which spent ~$2.30 in a run's first 2 hours). Returns how many brands were looked up."""
+    from crawler.clock import time_up
+    from crawler.control import find_websites
+    found = find_websites(conn, client, after_brand=commit, time_up=time_up)
+    for name, decided, waiting in found:
+        for host, state, reason in decided:
+            _host_line(summary, name, host, state, reason)
+        for host in waiting:
+            summary["needs_you"].append(f"{name}: {host} (found by discovery) waits for your approval (automatic "
+                                        "approval is off)")
+    return len(found)
 
 
 def _discover(conn, client, brand_id, name, summary):
@@ -543,11 +565,17 @@ def _report(summary, now):
                  f"{summary['embedded']}" + (f", pruned {summary['pruned']['sections']} old sections"
                                               if summary.get("pruned") else ""))
     misses = summary.get("misses") or {}
-    if any(misses.get(k) for k in ("uncovered_brand", "no_manual", "search_missed", "not_in_manuals", "repeat")):
+    if summary.get("websites_found"):
+        lines.append(f"Websites looked up first: {summary['websites_found']} brand(s) (missed by Breeze, never looked "
+                     "up, or due their 90-day recheck)")
+    if any(misses.get(k) for k in ("uncovered_brand", "brand_added", "close_brand", "no_manual", "search_missed",
+                                   "not_in_manuals", "repeat")):
         lines.append(f"Breeze misses sorted: {misses['no_manual']} model(s) with no manual (searched), "
                      f"{misses['search_missed']} answered by a manual search missed (new eval questions), "
-                     f"{misses['not_in_manuals']} not in the manuals, {misses['uncovered_brand']} on brands not "
-                     f"covered, {misses['repeat']} repeats; {misses['waiting']} wait for tomorrow")
+                     f"{misses['not_in_manuals']} not in the manuals, {misses.get('brand_added', 0)} new brand(s) "
+                     f"added, {misses.get('close_brand', 0)} close to a brand we have (waiting for you), "
+                     f"{misses['uncovered_brand']} not a brand name, {misses['repeat']} repeats; "
+                     f"{misses['waiting']} wait for tomorrow")
     issues = summary.get("issues") or {}
     if issues.get("open") or issues.get("fixed"):
         lines.append(f"Parse issues: {issues['open']} open ({issues['new']} new this run), {issues['fixed']} fixed by "
