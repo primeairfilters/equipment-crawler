@@ -14,11 +14,18 @@ HAS_NO_DOCUMENT_SQL = (
 )
 # The same rule for "has a manual": only an install or service manual covers the model; a spec sheet, parts list or
 # brochure alone does not (gap-fill, 2026-11-21).
+# An owner's manual is known by its title, a free rule (LIVE_CAMERA_CIRCLE D15; a new doc_type would send every document
+# back for paid tagging). One for the owner only does not cover the model, even when it was tagged install or service
+# manual: prod 2026-11-22 had 999 such, leaving 574 families looking covered. A title that is also for the installer or
+# the technician ("Owner's Manual & Installation Instructions", 167 on prod) still covers it.
+OWNER_TITLE_RE = r"(use\s*(&|and)\s*care|owner.?s?\s*(manual|guide)|user.?s?\s*(manual|guide)|homeowner)"
+INSTALLER_TITLE_RE = r"(install|service|technical|technician|repair|maintenance)"
 HAS_NO_MANUAL_SQL = (
     "NOT EXISTS (SELECT 1 FROM document_models dm JOIN documents d ON d.id = dm.document_id "
     "WHERE dm.manufacturer_id = em.manufacturer_id AND length(dm.model_key) >= 5 "
     "AND left(em.model_key, length(dm.model_key)) = dm.model_key "
-    "AND d.doc_type IN ('install_manual', 'service_manual') AND d.hidden_at IS NULL)"
+    "AND d.doc_type IN ('install_manual', 'service_manual') AND d.hidden_at IS NULL "
+    f"AND NOT (coalesce(d.title, '') ~* '{OWNER_TITLE_RE}' AND coalesce(d.title, '') !~* '{INSTALLER_TITLE_RE}'))"
 )
 
 ALLOWED_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5")

@@ -83,10 +83,13 @@ def test_the_limit_is_2000_searches_a_month():
 
 # ---------------------------------------------------------------- models found in documents, with no manual
 
-def found_in_docs(conn, name, key, doc_type, trade=None):
+def found_in_docs(conn, name, key, doc_type, trade=None, title=None):
     """A model the crawler found in one of its documents (not ENERGY STAR), and that document's page text."""
     from p3support import linked_doc
-    linked_doc(conn, name, key, doc_type)
+    document_id = linked_doc(conn, name, key, doc_type)
+    if title:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE documents SET title = %s WHERE id = %s", (title, document_id))
     if trade:
         with conn.cursor() as cur:
             cur.execute("UPDATE models SET trade = %s WHERE model_key = %s", (trade, key))
@@ -112,6 +115,45 @@ def test_a_model_with_an_install_or_service_manual_is_not_searched(runtime_conn)
     fake = FakeGapAI()
     run(runtime_conn, fake, name)
     assert fake.searches() == []
+
+
+@pytest.mark.parametrize("title", ["Owner's Manual Split Air Conditioner", "Use & Care Guide - Electronic Dryer",
+                                   "Gas Range Use and Care Manual", "Owners Manual", "Floor Console Ductless System Owner’s Manual",
+                                   "WINDOW TYPE ROOM AIR CONDITIONER User's Manual", "Homeowners Manual Ecomatic HS 3220"])
+def test_an_owner_only_manual_does_not_count_as_the_models_manual(runtime_conn, title):
+    # LIVE_CAMERA_CIRCLE D15 (the user, 2026-11-22): prod had 999 owner's manuals tagged install or service manual, so
+    # 574 families counted as having a manual and the tech's install manual was never searched for.
+    f = fam("W")
+    name, brand_id = tracked(runtime_conn, [])
+    found_in_docs(runtime_conn, name, model(f), "install_manual", title=title)
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    assert [f in s[3] for s in fake.searches()] == [True]
+
+
+@pytest.mark.parametrize("title", ["Owner's Manual & Installation Instructions", "RANGE HOOD Installation, Use and Care Manual",
+                                   "Premium Control Installation and User Guide",
+                                   "MEW1 Series Owner's Manual Installation, Operation, & Maintenance Instructions",
+                                   "Split System Installation Manual"])
+def test_a_manual_that_is_also_for_the_installer_still_counts(runtime_conn, title):
+    f = fam("C")
+    name, brand_id = tracked(runtime_conn, [])
+    found_in_docs(runtime_conn, name, model(f), "install_manual", title=title)
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    assert fake.searches() == []
+
+
+def test_the_missing_manual_search_also_asks_for_the_owners_manual(runtime_conn):
+    # D15: Tech Support users need the owner's ("Use & Care") manual most.
+    f = fam("U")
+    name, brand_id = tracked(runtime_conn, [])
+    found_in_docs(runtime_conn, name, model(f), "spec_sheet")
+    fake = FakeGapAI()
+    run(runtime_conn, fake, name)
+    query = fake.searches()[0][3].lower()
+    assert "installation manual" in query and "service manual" in query
+    assert "owner's manual" in query and "use and care" in query
 
 
 def test_a_found_model_outside_the_brands_trades_is_not_searched(runtime_conn):

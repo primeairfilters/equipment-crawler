@@ -22,7 +22,7 @@ import hashlib
 
 MAX_SEARCHES_PER_MONTH = 2000  # about a penny each (200 cost $2.29 in Nov 2026); the dollar cap still holds
 WANT_ANY = "spec sheet or installation manual"
-WANT_MANUAL = "installation manual or service manual"
+WANT_MANUAL = "installation manual, service manual or owner's manual (use and care)"  # owner's: D15, for Tech Support users
 MAX_TOKENS = 4000
 ASSUMED_INPUT_TOKENS = 60_000
 MISS_BACKOFF = timedelta(days=180)

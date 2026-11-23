@@ -84,6 +84,26 @@ like) matter far more than brand number 350.
 - **Three reviewers on separate parts** (AI spending, downloading, reading) found leads fast; their guesses about
   causes were wrong about half the time, so verify each on prod before building.
 
+## 2026-11-23 — LIVE_CAMERA_CIRCLE.md phase 7: owner's manuals
+
+D15 in the spec. Tech Support users need the owner's ("Use & Care") manual, and gap-fill only asked for install and
+service manuals.
+
+- **Found on prod (claude_ro, 2026-11-22):** 1,047 not-hidden documents have owner-style titles (`store.OWNER_TITLE_RE`).
+  999 of them are tagged install_manual (619) or service_manual (380). 167 of the 1,047 are also for the installer
+  ("Owner's Manual & Installation Instructions", `INSTALLER_TITLE_RE`), and 880 are owner-only. So 574 model families
+  counted as "has a manual" only through an owner-only manual. The tech's install manual was never searched for them.
+- **Changed (the user, 2026-11-22: "stop counting owner-only manuals"):** `HAS_NO_MANUAL_SQL` skips an owner-only title.
+  `WANT_MANUAL` now asks for install, service or owner's (use and care) manuals in the same single search, at no extra cost.
+  - No new doc_type and no re-tagging. A new type would bump `EXTRACTOR_VERSION` and send all 33,784 documents back
+    for paid tagging.
+  - Expect about 574 one-time searches, about $6.60 at $2.29 per 200, inside the 2,000-a-month and $50 caps.
+- **Tests:** `tests/test_p5_gapfill.py`, 13 new cases (7 owner-only titles, 5 that still count, and the query words).
+  The 8 that test the change failed before it, and all 41 in the file pass after.
+- **Still open:** the Breeze-miss search (`search_family`) still asks for "spec sheet or installation manual". After
+  Dec 1, check the gap-fill searches on the newly counted families. Only real runs can show whether the wider words
+  bring back owner's manuals without losing install manuals.
+
 ## 2026-11-22 — LIVE_CAMERA_CIRCLE.md phase 6: brands from misses, websites looked up first
 
 The goal above the theme is now the circle that ends at Live Camera (see CLAUDE.md). The spec is in HVACApp
